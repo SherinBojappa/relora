@@ -1,0 +1,10 @@
+torch
+transformers
+tokenizers
+datasets
+peft
+wandb
+loguru
+deepspeed
+nvitop
+lion-pytorch
