@@ -7,6 +7,7 @@ from transformers import T5Tokenizer, T5ForConditionalGeneration
 from datasets import load_dataset, load_metric
 from transformers.data.data_collator import DataCollatorWithPadding
 from tqdm import tqdm
+import torch
 
 from preprocessors import glue, stsb, string_to_float
 
@@ -18,7 +19,7 @@ task_to_keys = {
     "qqp": ("question1", "question2"),
     "rte": ("sentence1", "sentence2"),
     "sst2": ("sentence", None),
-    "stsb": ("sentence1", "sentence2"),
+    "sts-b": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
 }
 
@@ -99,11 +100,14 @@ def arg_parse():
     args = parser.parse()
     return args
 
-
+"""
 def preprocess_function(examples):
     if setence2_key is None:
         return tokenizer(examples[setence1_key], truncation=True)
     return tokenizer(examples[setence1_key], examples[setence2_key], truncation=True)
+"""
+def preprocess_function(examples):
+    return tokenizer(examples['inputs'], examples['targets'], truncation=True)
 
 def evaluate(dataloader, task_name=None):
     with torch.no_grad():
@@ -140,10 +144,17 @@ def evaluate_glue(tokenizer, task_name=None):
             metric_functions = {metric: load_metric('glue', task, metric) for metric in metrics}
 
             collator = DataCollatorWithPadding(tokenizer=tokenizer)
+            # map label id to label string
+            if args.task_name is 'sts-b':
+                dataset = dataset.map(stsb, batched=True)
+            else:
+                glue_partial = partial(glue, benchmark_name=args.task_name, label_list=tasks_to_labels[args.task_name])
+                dataset = dataset.map(glue_partial, batched=True)
+
             tokenized_dataset = dataset.map(preprocess_function, batched=True)
 
             # Create a PyTorch data loader for the validation set
-            test_dataloader = torch.utils.data.DataLoader(tokenized_dataset['test'], batch_size=args.batch_size, collate_fn=collator)
+            test_dataloader = torch.utils.data.DataLoader(tokenized_dataset['validation'], batch_size=args.batch_size, collate_fn=collator)
 
             # Run the model on the validation set and compute the metrics
             model.eval()
@@ -187,18 +198,24 @@ def main():
     logger.info(f"Loaded model: {args.model}")
 
     dataset = load_dataset(args.dataset, args.task_name)
-    setence1_key, setence2_key = task_to_keys[args.task_name]
+    #setence1_key, setence2_key = task_to_keys[args.task_name]
 
+    # map label id to label string
+    if args.task_name is 'sts-b':
+        dataset = dataset.map(stsb, batched=True)
+    else:
+        glue_partial = partial(glue, benchmark_name=args.task_name, label_list=tasks_to_labels[args.task_name])
+        dataset = dataset.map(glue_partial, batched=True)
     tokenized_dataset = dataset.map(preprocess_function, batched=True)
 
-    num_labels = 3 if args.task_name.startswith("mnli") else 1 if args.task_name.startswith("stsb") else 2
-    metric_name = "pearson" if args.task_name.startswith("stsb") else "matthews_correlation" if args.task_name.startswith("cola") else "accuracy"
-
+    #num_labels = 3 if args.task_name.startswith("mnli") else 1 if args.task_name.startswith("stsb") else 2
+    #metric_name = "pearson" if args.task_name.startswith("stsb") else "matthews_correlation" if args.task_name.startswith("cola") else "accuracy"
 
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
-    train_dataloader = torch.utils.data.DataLoader(tokenized_dataset["train"], batch_size=args.batch_size, collate_fn=collator)
-    val_dataloader = torch.utils.data.DataLoader(tokenized_dataset["validation"], batch_size=args.batch_size, collate_fn=collator)
-    #test_dataloader = torch.utils.data.DataLoader(tokenzied_dataset["test"], batch_size=args.batch_size, collate_fn=collator)
+    # report metrics on val dataset as some of the datasets on glue do not have labels for the test dataset
+    train_dataset, val_dataset = tokenized_dataset['train'].train_test_split(test_size=0.2, seed=args.fixed_seed_val)
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collator)
+    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, collate_fn=collator)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device)
