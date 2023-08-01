@@ -8,6 +8,7 @@ from datasets import load_dataset, load_metric
 from transformers.data.data_collator import DataCollatorWithPadding
 from tqdm import tqdm
 
+from preprocessors import glue, stsb, string_to_float
 
 task_to_keys = {
     "cola": ("sentence", None),
@@ -33,6 +34,19 @@ metric_mapping = {
     'rte': 'accuracy',
     'wnli': 'accuracy'
 }
+
+tasks_to_labels = {
+    'cola': ['unacceptable', 'acceptable'],
+    'sst2': ['negative', 'positive'],
+    'mrpc': ['not_equivalent', 'equivalent'],
+    'qqp': ['not_duplicate', 'duplicate'],
+    'sts-b': [],
+    'mnli': ['entailment', 'neutral', 'contradiction'],
+    'qnli': ['entailment', 'not_entailment'],
+    'rte': ['entailment', 'not_entailment'],
+    'wnli': ['not_entailment', 'entailment']
+}
+
 
 def arg_parse():
     parser = argparse.ArgumentParser("Supervised fine tuning using ReLoRA")
