@@ -8,3 +8,6 @@ loguru
 deepspeed
 nvitop
 lion-pytorch
+scipy
+scikit-learn
+evaluate
