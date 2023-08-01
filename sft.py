@@ -1,8 +1,13 @@
 import os
 import time
 import argparse
+import random
+from functools import partial
 
+import wandb
+import numpy as np
 from loguru import logger
+import transformers
 from transformers import T5Tokenizer, T5ForConditionalGeneration
 from datasets import load_dataset, load_metric
 from transformers.data.data_collator import DataCollatorWithPadding
@@ -41,6 +46,7 @@ tasks_to_labels = {
     'sst2': ['negative', 'positive'],
     'mrpc': ['not_equivalent', 'equivalent'],
     'qqp': ['not_duplicate', 'duplicate'],
+    # processed differently as this is a regression task
     'sts-b': [],
     'mnli': ['entailment', 'neutral', 'contradiction'],
     'qnli': ['entailment', 'not_entailment'],
@@ -49,7 +55,7 @@ tasks_to_labels = {
 }
 
 
-def arg_parse():
+def parse_args():
     parser = argparse.ArgumentParser("Supervised fine tuning using ReLoRA")
     parser.add_argument("--fixed_seed_val",
                         type=int,
@@ -69,17 +75,17 @@ def arg_parse():
 
     parser.add_argument("--dataset",
                         type=str,
-                        default="GLUE",
+                        default="glue",
                         help="The dataset to fine tune on")
 
     parser.add_argument("--task_name",
                         type=str,
-                        default="SST-2",
+                        default="sst2",
                         help="The subset of the dataset to fine tune on")
 
     parser.add_argument("--batch_size",
                         type=int,
-                        default=8,
+                        default=32,
                         help="batch size for fine tuning")
 
     parser.add_argument("--learning_rate",
@@ -97,19 +103,15 @@ def arg_parse():
                         default=100,
                         help="Number of steps between evaluations")
 
-    args = parser.parse()
+    parser.add_argument("--max_length",
+                        type=int,
+                        default=128,
+                        help="Maximum length of the input sequence")
+
+    args = parser.parse_args()
     return args
 
-"""
-def preprocess_function(examples):
-    if setence2_key is None:
-        return tokenizer(examples[setence1_key], truncation=True)
-    return tokenizer(examples[setence1_key], examples[setence2_key], truncation=True)
-"""
-def preprocess_function(examples):
-    return tokenizer(examples['inputs'], examples['targets'], truncation=True)
-
-def evaluate(dataloader, task_name=None):
+def evaluate(val_dataloader, task_name=None):
     with torch.no_grad():
         model.eval()
         all_predictions = []
@@ -145,10 +147,10 @@ def evaluate_glue(tokenizer, task_name=None):
 
             collator = DataCollatorWithPadding(tokenizer=tokenizer)
             # map label id to label string
-            if args.task_name is 'sts-b':
+            if args.task_name == 'sts-b':
                 dataset = dataset.map(stsb, batched=True)
             else:
-                glue_partial = partial(glue, benchmark_name=args.task_name, label_list=tasks_to_labels[args.task_name])
+                glue_partial = partial(glue, benchmark_name=args.task_name, label_names=tasks_to_labels[args.task_name])
                 dataset = dataset.map(glue_partial, batched=True)
 
             tokenized_dataset = dataset.map(preprocess_function, batched=True)
@@ -178,7 +180,7 @@ def main():
 
     # log into file
     logger.remove()
-    logger.add(f"relora_{args.task_name}.log", 'w')
+    logger.add(f"relora_{args.task_name}.log", mode='w')
     logger.info(f"The args are: {args}")
 
     # fix seed
@@ -196,24 +198,41 @@ def main():
     model = T5ForConditionalGeneration.from_pretrained(args.model)
     tokenizer = T5Tokenizer.from_pretrained(args.model)
     logger.info(f"Loaded model: {args.model}")
+    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Number of trainable parameters: {params}")
 
     dataset = load_dataset(args.dataset, args.task_name)
-    #setence1_key, setence2_key = task_to_keys[args.task_name]
 
     # map label id to label string
-    if args.task_name is 'sts-b':
+    if args.task_name == 'sts-b':
         dataset = dataset.map(stsb, batched=True)
     else:
-        glue_partial = partial(glue, benchmark_name=args.task_name, label_list=tasks_to_labels[args.task_name])
-        dataset = dataset.map(glue_partial, batched=True)
-    tokenized_dataset = dataset.map(preprocess_function, batched=True)
+        glue_partial = partial(glue, benchmark_name=args.task_name, label_names=tasks_to_labels[args.task_name])
+        column_names = dataset['train'].column_names
+        dataset = dataset.map(glue_partial, remove_columns=column_names)
+
+    def preprocess_function(examples):
+        inputs = examples['inputs']
+        targets = examples['targets']
+        inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding=True, return_tensors='pt')
+        targets = tokenizer(targets, truncation=True, max_length=args.max_length, padding=True, return_tensors='pt')
+        # pad tokens are ignored in the loss
+        targets[targets == tokenizer.pad_token_id] = -100
+        return {'input_ids': inputs['input_ids'],
+                'attention_mask': inputs['attention_mask'],
+                'labels': targets['input_ids']}
+
+    old_columns = dataset['train'].column_names
+    tokenized_dataset = dataset.map(preprocess_function, batched=True, remove_columns=old_columns)
 
     #num_labels = 3 if args.task_name.startswith("mnli") else 1 if args.task_name.startswith("stsb") else 2
     #metric_name = "pearson" if args.task_name.startswith("stsb") else "matthews_correlation" if args.task_name.startswith("cola") else "accuracy"
 
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
     # report metrics on val dataset as some of the datasets on glue do not have labels for the test dataset
-    train_dataset, val_dataset = tokenized_dataset['train'].train_test_split(test_size=0.2, seed=args.fixed_seed_val)
+    split_dataset = tokenized_dataset['train'].train_test_split(test_size=0.2, seed=args.fixed_seed_val)
+    train_dataset = split_dataset['train']
+    val_dataset = split_dataset['test']
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collator)
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, collate_fn=collator)
 
@@ -223,7 +242,7 @@ def main():
 
     # training loop
     global_step = 0
-    for epoch in tqdm(epoch):
+    for epoch in tqdm(range(args.num_epochs)):
         for batch in train_dataloader:
             global_step += 1
             model.train()
@@ -237,16 +256,18 @@ def main():
             wandb.log(
                 {"train_loss": loss.item(),
                 "step": global_step,
+                "epoch": epoch,
                 "learning_rate": optimizer.param_groups[0]["lr"]}
             )
 
         if global_step % args.eval_every == 0:
+            logger.info(f"Computing the evaluation")
             evaluate(val_dataloader)
 
     logger.info("Finished fine tuning")
 
     # evaluate all glue datasets on the fine tuned model
-    evaluate_glue(test_dataloader, args.task_name)
+    #evaluate_glue(test_dataloader, args.task_name)
     wandb.finish()
 
 if __name__ == "__main__":

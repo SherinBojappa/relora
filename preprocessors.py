@@ -1,5 +1,5 @@
 # Convert dataset into text to text format.
-# The code is from https://github.com/google-research/text-to-text-transfer-transformer/blob/main/t5/data/preprocessors.py#L816
+# The code is based on https://github.com/google-research/text-to-text-transfer-transformer/blob/main/t5/data/preprocessors.py
 
 import re
 import torch
@@ -53,18 +53,6 @@ def glue(x, benchmark_name, label_names, feature_names=None, id_key='idx'):
     joined = ' '.join(strs_to_join)
 
     ex = {}
-
-    if benchmark_name == 'multirc':
-        joined = re.sub('<br>', ' ', joined)
-        joined = re.sub('<(/)?b>', '', joined)
-
-        ex['idx/paragraph'] = x['idx']['paragraph']
-        ex['idx/question'] = x['idx']['question']
-        ex['idx/answer'] = x['idx']['answer']
-    else:
-        if id_key:
-            ex['idx'] = x[id_key]
-
     ex['inputs'] = joined
     ex['targets'] = label_name
 
