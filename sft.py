@@ -12,6 +12,7 @@ from transformers import T5Tokenizer, T5ForConditionalGeneration
 from datasets import load_dataset, load_metric
 from transformers.data.data_collator import DataCollatorWithPadding
 from tqdm import tqdm
+import evaluate
 import torch
 
 from preprocessors import glue, stsb, string_to_float
@@ -111,7 +112,8 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-def evaluate(val_dataloader, task_name=None):
+def eval(model, val_dataloader, global_step, task_name=None):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     with torch.no_grad():
         model.eval()
         all_predictions = []
@@ -120,18 +122,20 @@ def evaluate(val_dataloader, task_name=None):
             batch = batch.to(device)
             outputs = model(**batch)
             loss = outputs.loss
-            logits = outputs.logits.argmax(dim=-1).cpu().numpy()
-            labels = batch["labels"].cpu().numpy()
+            # logits corresponding to </s> is ignored so just take first element
+            #outputs.logist -> (batch_size, seq_len, vocab_size); seq len is 2 for label </s>
+            logits = outputs.logits[:, 0, :].argmax(dim=-1).cpu().numpy()
+
+            labels = batch["labels"][:, 0].cpu().numpy()
             all_predictions.extend(logits)
             all_labels.extend(labels)
-            wandb.log({"eval_loss": loss.item(), "step": global_step})
-
             # implement the metric based on the task
-            metrics = metric_mapping[task_name]
-            metric_functions = {metric: load_metric('glue', task_name, metric) for metric in metrics}
-            # only one metric
+            metric = metric_mapping[task_name]
+            metric_function = evaluate.load(metric)
             score = metric_function.compute(predictions=all_predictions, references=all_labels)
-            logger.info(f'Task: {task}, Metric: {metric}, Score: {score}')
+            logger.info(f'Task: {task_name}, Metric: {metric}, Score: {score}')
+            wandb.log({"eval_loss": loss.item(), "step": global_step, "metric":score}, step=global_step)
+
 
 def evaluate_glue(tokenizer, task_name=None):
     # Evaluate the model on each GLUE task
@@ -143,7 +147,7 @@ def evaluate_glue(tokenizer, task_name=None):
             metrics = metric_mapping[task]
             if not isinstance(metrics, list):
                 metrics = [metrics]
-            metric_functions = {metric: load_metric('glue', task, metric) for metric in metrics}
+            metric_functions = {metric: evaluate.load(metric) for metric in metrics}
 
             collator = DataCollatorWithPadding(tokenizer=tokenizer)
             # map label id to label string
@@ -165,8 +169,10 @@ def evaluate_glue(tokenizer, task_name=None):
             for batch in val_dataloader:
                 with torch.no_grad():
                     outputs = model(**batch)
-                    logits = outputs.logits.argmax(dim=-1).cpu().numpy()
-                    labels = batch["labels"].cpu().numpy()
+                    # logits corresponding to </s> is ignored so just take first element
+                    #outputs.logist -> (batch_size, seq_len, vocab_size); seq len is 2 for label </s>
+                    logits = outputs.logits[:, 0, :].argmax(dim=-1).cpu().numpy()
+                    labels = batch["labels"][:, 0].cpu().numpy()
                     all_predictions.extend(logits)
                     all_labels.extend(labels)
 
@@ -257,12 +263,14 @@ def main():
                 {"train_loss": loss.item(),
                 "step": global_step,
                 "epoch": epoch,
-                "learning_rate": optimizer.param_groups[0]["lr"]}
+                "learning_rate": optimizer.param_groups[0]["lr"]},
+                step=global_step
             )
 
-        if global_step % args.eval_every == 0:
-            logger.info(f"Computing the evaluation")
-            evaluate(val_dataloader)
+            #import pdb; pdb.set_trace()
+            if global_step % args.eval_every == 0:
+                logger.info(f"Computing the evaluation")
+                eval(model, val_dataloader, global_step, args.task_name)
 
     logger.info("Finished fine tuning")
 
