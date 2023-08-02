@@ -16,6 +16,8 @@ import evaluate
 import torch
 
 from preprocessors import glue, stsb, string_to_float
+from functional import wrap_with_ReLoRa, merge_and_reinit_functional
+from optim import get_ragged_cosine_schedule, reset_optimizer
 
 task_to_keys = {
     "cola": ("sentence", None),
@@ -108,6 +110,22 @@ def parse_args():
                         type=int,
                         default=128,
                         help="Maximum length of the input sequence")
+
+    parser.add_argument("--relora",
+                        type=bool,
+                        store_action=True,
+                        default=False,
+                        help="Whether to use ReLoRA or not")
+
+    parser.add_argument("--r",
+                        type=int,
+                        defaul=128,
+                        help="rank used in ReLoRA")
+
+    parser.add_argument("--relora_frequency",
+                        type=int,
+                        default=100,
+                        help="Frequency of ReLoRA")
 
     args = parser.parse_args()
     return args
@@ -202,6 +220,17 @@ def main():
 
     # load pre-trained model
     model = T5ForConditionalGeneration.from_pretrained(args.model)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    # relora
+    if args.relora:
+        model = wrap_with_ReLoRa(model=model, r=args.r)
+        logger.info(f"Relora with rank {args.r} is used")
+        logger.info
+        optimizer = torch.optim.Adam((p for p in model.parameters() if p.requires_grad), lr=args.learning_rate)
+        lr_scheduler = get_ragged_cosine_schedule(optimizer, reset_freq=args.relora_frequency)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device=device, dtype=torch.bfloat16)
     tokenizer = T5Tokenizer.from_pretrained(args.model)
     logger.info(f"Loaded model: {args.model}")
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -242,9 +271,6 @@ def main():
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collator)
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, collate_fn=collator)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
     # training loop
     global_step = 0
@@ -257,7 +283,15 @@ def main():
             outputs = model(**batch)
             loss = outputs.loss
             loss.backward()
-            optimizer.step()
+            if args.relora:
+                lr_scheduler.step()
+            else:
+                optimizer.step()
+
+            # relora merge weights, reinit weights and reset optimizer
+            if global_step % args.relora_frequency == 0:
+                merge_and_reinit_functional(model)
+                reset_optimizer(optimizer)
 
             wandb.log(
                 {"train_loss": loss.item(),
