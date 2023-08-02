@@ -4,7 +4,7 @@ from functools import partial
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
-from megatron import print_rank_0
+#from megatron import print_rank_0
 
 
 def get_ragged_cosine_schedule(
@@ -75,7 +75,7 @@ def _get_cosine_schedule_with_multiple_warmups_lambda(
 
         _cosine_decay = 0.5 * (1.0 + math.cos(math.pi * end_of_warmup_progress))
         warmup_lr_multiplier = min_lr_ratio + (1.0 - min_lr_ratio) * _cosine_decay
-    
+
         return float(restart_step) / float(max(1, restart_warmup_steps)) * warmup_lr_multiplier
 
     progress = float(_current_step - first_warmup_steps) / float(max(1, num_training_steps - first_warmup_steps))
@@ -135,4 +135,5 @@ def reset_optimizer(
             n_zeros += torch.sum(param_state[key] == 0).item()
 
     _zeroed = n_zeros / (1e-7 + n_total) * 100
-    print_rank_0(f"Percent of optimizer states zeroed: {_zeroed:.2f}")
+    #print_rank_0(f"Percent of optimizer states zeroed: {_zeroed:.2f}")
+    print(f"Percent of optimizer states zeroed: {_zeroed:.2f}")

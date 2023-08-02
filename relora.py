@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from megatron import print_rank_0
+#from megatron import print_rank_0
 
 
 class ReLoRaModel(torch.nn.Module):
@@ -34,7 +34,8 @@ class ReLoRaModel(torch.nn.Module):
             if not isinstance(module, nn.Linear):
                 continue
             if isinstance(module, ReLoRaLinear):
-                print_rank_0("WARNING: Trying to wrap ReLoRA into ReLoRA. Are you sure this is what you want?")
+                #print_rank_0("WARNING: Trying to wrap ReLoRA into ReLoRA. Are you sure this is what you want?")
+                print("WARNING: Trying to wrap ReLoRA into ReLoRA. Are you sure this is what you want?")
                 continue
 
             new_module = ReLoRaLinear(
@@ -98,7 +99,7 @@ class ReLoRaLinear(nn.Linear):
         **kwargs,
     ):
         """Wraps linear layer x W into x W + x W_a @ W_b * lora_alpha / r
-        
+
         Notice that scale = lora_alpha / r.
         """
         if r <= 0:
@@ -112,6 +113,8 @@ class ReLoRaLinear(nn.Linear):
         self.lora_alpha = lora_alpha
         self.lora_dropout = nn.Dropout(p=lora_dropout)
         self.trainable_scaling = trainable_scaling
+        # TODO double check if this is correct
+        self.lora_only = False
 
         if r > 0:
             self.lora_A = nn.Linear(in_features, r, bias=False)
@@ -139,7 +142,7 @@ class ReLoRaLinear(nn.Linear):
         # disgard original, but now we need to init both A and B with kaiming
         nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
         nn.init.kaiming_uniform_(self.lora_B.weight, a=math.sqrt(5))
-    
+
     def _post_lora_scale(self):
         if self.trainable_scaling:
             return self.scaling.tanh()
