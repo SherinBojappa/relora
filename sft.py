@@ -112,20 +112,36 @@ def parse_args():
                         help="Maximum length of the input sequence")
 
     parser.add_argument("--relora",
-                        type=bool,
-                        store_action=True,
+                        action="store_true",
                         default=False,
+                        required=False,
                         help="Whether to use ReLoRA or not")
 
     parser.add_argument("--r",
                         type=int,
-                        defaul=128,
+                        default=128,
                         help="rank used in ReLoRA")
 
     parser.add_argument("--relora_frequency",
                         type=int,
                         default=100,
                         help="Frequency of ReLoRA")
+
+    parser.add_argument("--num_training_steps",
+                       type=int,
+                       default=200,
+                       help="Number of training steps to perform")
+
+    parser.add_argument("--first_warmup_steps",
+                       type=int,
+                       default=50,
+                       help="First warmup steps")
+
+    parser.add_argument("--restart_warmup_steps",
+                       type=int,
+                       default=10,
+                       help="Number of restart warmup steps to perform")
+
 
     args = parser.parse_args()
     return args
@@ -225,9 +241,15 @@ def main():
     if args.relora:
         model = wrap_with_ReLoRa(model=model, r=args.r)
         logger.info(f"Relora with rank {args.r} is used")
-        logger.info
+        params_to_update = [param for param in model.parameters() if param.requires_grad]
+        #params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        params = sum(p.numel() for p in params_to_update)
+        logger.info(f"Number of trainable parameters: {params}")
         optimizer = torch.optim.Adam((p for p in model.parameters() if p.requires_grad), lr=args.learning_rate)
-        lr_scheduler = get_ragged_cosine_schedule(optimizer, reset_freq=args.relora_frequency)
+        lr_scheduler = get_ragged_cosine_schedule(optimizer=optimizer, num_training_steps=args.num_training_steps, \
+                                                  first_warmup_steps=args.first_warmup_steps, \
+                                                  restart_warmup_steps = args.restart_warmup_steps, \
+                                                  reset_freq=args.relora_frequency)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device=device, dtype=torch.bfloat16)
@@ -291,7 +313,7 @@ def main():
             # relora merge weights, reinit weights and reset optimizer
             if global_step % args.relora_frequency == 0:
                 merge_and_reinit_functional(model)
-                reset_optimizer(optimizer)
+                reset_optimizer(optimizer, reset_params=params_to_update, pruning_amount=0.9)
 
             wandb.log(
                 {"train_loss": loss.item(),
