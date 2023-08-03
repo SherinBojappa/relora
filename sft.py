@@ -8,9 +8,10 @@ import wandb
 import numpy as np
 from loguru import logger
 import transformers
-from transformers import T5Tokenizer, T5ForConditionalGeneration
+from transformers import AutoTokenizer
 from datasets import load_dataset, load_metric
 from transformers.data.data_collator import DataCollatorWithPadding
+from transformers import AutoModelForMaskedLM, AutoModelForCausalLM, T5ForConditionalGeneration
 from tqdm import tqdm
 import evaluate
 import torch
@@ -18,6 +19,12 @@ import torch
 from preprocessors import glue, stsb, string_to_float
 from functional import wrap_with_ReLoRa, merge_and_reinit_functional
 from optim import get_ragged_cosine_schedule, reset_optimizer
+
+ARCH_TO_CLASS = {
+    "encoder": AutoModelForMaskedLM,
+    "decoder": AutoModelForCausalLM,
+    "encoder-decoder": T5ForConditionalGeneration
+}
 
 task_to_keys = {
     "cola": ("sentence", None),
@@ -75,6 +82,11 @@ def parse_args():
                         #default="t5-3b",
                         default="t5-small",
                         help="Model to perform ReLoRA fine tuning on")
+
+    parser.add_argument('--model_arch',
+                        default=None,
+                        type=str,
+                        help='Model architecture. Choose from "encoder", "decoder", "encoder-decoder"')
 
     parser.add_argument("--dataset",
                         type=str,
@@ -235,7 +247,8 @@ def main():
     logger.info(f"Initialized wandb with run name: {args.run_name}")
 
     # load pre-trained model
-    model = T5ForConditionalGeneration.from_pretrained(args.model)
+    model = ARCH_TO_CLASS[args.model_arch].from_pretrained(args.model)
+    #model = T5ForConditionalGeneration.from_pretrained(args.model)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     # relora
     if args.relora:
@@ -252,8 +265,10 @@ def main():
                                                   reset_freq=args.relora_frequency)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model.to(device=device, dtype=torch.bfloat16)
-    tokenizer = T5Tokenizer.from_pretrained(args.model)
+    #model = model.to(device=device, dtype=torch.bfloat16)
+    model = model.to(device=device)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
+    #tokenizer = T5Tokenizer.from_pretrained(args.model)
     logger.info(f"Loaded model: {args.model}")
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Number of trainable parameters: {params}")
@@ -261,29 +276,46 @@ def main():
     dataset = load_dataset(args.dataset, args.task_name)
 
     # map label id to label string
-    if args.task_name == 'sts-b':
-        dataset = dataset.map(stsb, batched=True)
-    else:
-        glue_partial = partial(glue, benchmark_name=args.task_name, label_names=tasks_to_labels[args.task_name])
-        column_names = dataset['train'].column_names
-        dataset = dataset.map(glue_partial, remove_columns=column_names)
+    if args.model == "t5-3b":
+        if args.task_name == 'sts-b':
+            dataset = dataset.map(stsb, batched=True)
+        else:
+            glue_partial = partial(glue, benchmark_name=args.task_name, label_names=tasks_to_labels[args.task_name])
+            column_names = dataset['train'].column_names
+            dataset = dataset.map(glue_partial, remove_columns=column_names)
 
-    def preprocess_function(examples):
-        inputs = examples['inputs']
-        targets = examples['targets']
-        inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding=True, return_tensors='pt')
-        targets = tokenizer(targets, truncation=True, max_length=args.max_length, padding=True, return_tensors='pt')
-        # pad tokens are ignored in the loss
-        targets[targets == tokenizer.pad_token_id] = -100
-        return {'input_ids': inputs['input_ids'],
-                'attention_mask': inputs['attention_mask'],
-                'labels': targets['input_ids']}
+            def preprocess_function(examples):
+                inputs = examples['inputs']
+                targets = examples['targets']
+                inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding=True, return_tensors='pt')
+                targets = tokenizer(targets, truncation=True, max_length=args.max_length, padding=True, return_tensors='pt')
+                # pad tokens are ignored in the loss
+                targets[targets == tokenizer.pad_token_id] = -100
+                return {'input_ids': inputs['input_ids'],
+                        'attention_mask': inputs['attention_mask'],
+                        'labels': targets['input_ids']}
 
-    old_columns = dataset['train'].column_names
-    tokenized_dataset = dataset.map(preprocess_function, batched=True, remove_columns=old_columns)
+            old_columns = dataset['train'].column_names
+            tokenized_dataset = dataset.map(preprocess_function, batched=True, remove_columns=old_columns)
+    else: # do not have to use t5 tokenization in text to text format
+        import pdb; pdb.set_trace()
+        sentence1_key, sentence2_key = task_to_keys[args.task_name]
+        def preprocess_function(examples):
+            if sentence2_key is None:
+                # Tokenize a single sentence
+                tokenized = tokenizer(examples[sentence1_key], truncation=True)
+                return tokenized
 
-    #num_labels = 3 if args.task_name.startswith("mnli") else 1 if args.task_name.startswith("stsb") else 2
-    #metric_name = "pearson" if args.task_name.startswith("stsb") else "matthews_correlation" if args.task_name.startswith("cola") else "accuracy"
+            # Tokenize a pair of sentences: one defined by sentence1_key, the other defined by sentence2_key
+            tokenized = tokenizer(examples[sentence1_key], text_pair=examples[sentence2_key], truncation=True)
+            return tokenized
+
+        # do not remove label
+        old_column_names = [c for c in dataset["train"].column_names if c != "label"]
+        tokenized_dataset = dataset.map(preprocess_function, batched=True, remove_columns=old_column_names)
+
+    num_labels = 3 if args.task_name.startswith("mnli") else 1 if args.task_name.startswith("stsb") else 2
+    metric_name = "pearson" if args.task_name.startswith("stsb") else "matthews_correlation" if args.task_name.startswith("cola") else "accuracy"
 
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
     # report metrics on val dataset as some of the datasets on glue do not have labels for the test dataset
