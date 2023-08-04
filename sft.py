@@ -8,7 +8,7 @@ import wandb
 import numpy as np
 from loguru import logger
 import transformers
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, DataCollatorForLanguageModeling
 from datasets import load_dataset, load_metric
 from transformers.data.data_collator import DataCollatorWithPadding
 from transformers import AutoModelForMaskedLM, AutoModelForCausalLM, T5ForConditionalGeneration
@@ -244,6 +244,7 @@ def main():
     # wandb init
     wandb.init(project=args.wandb_project, config=args)
     args.run_name = wandb.run.name
+
     logger.info(f"Initialized wandb with run name: {args.run_name}")
 
     # load pre-trained model
@@ -268,6 +269,7 @@ def main():
     #model = model.to(device=device, dtype=torch.bfloat16)
     model = model.to(device=device)
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     #tokenizer = T5Tokenizer.from_pretrained(args.model)
@@ -298,8 +300,7 @@ def main():
 
     def preprocess_function_decoder(examples):
         inputs = examples['inputs'] + examples['targets']
-        inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding=True, return_tensors='pt')
-
+        inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding="max_length", return_tensors='pt')
         # Create a mask where the elements corresponding to example['inputs'] are True
         mask = torch.full((len(inputs['input_ids'][0]),), fill_value=False, dtype=torch.bool)
 
@@ -309,26 +310,28 @@ def main():
         #print(len(tokenizer(examples['inputs'])['input_ids'])) # 14
         mask[:len(tokenizer(examples['inputs'])['input_ids'])-1] = True
 
-        targets = inputs['input_ids'].clone().squeeze(0)
+        targets = inputs['input_ids'].clone()
 
         # pad tokens are ignored in the loss
         targets[targets == tokenizer.pad_token_id] = -100
 
         # inputs are also ignored in the loss
-        targets[mask] = -100
+        targets[mask.unsqueeze(0)] = -100
 
         return {'input_ids': inputs['input_ids'].squeeze(0),
                 'attention_mask': inputs['attention_mask'].squeeze(0),
-                'labels': targets}
+                'labels': targets.squeeze(0)}
 
     old_columns = dataset['train'].column_names
-    if args.model_arch == "enocoder_decoder":
+    if args.model_arch == "encoder-decoder":
         tokenized_dataset = dataset.map(preprocess_function_encoder_decoder, batched=True, remove_columns=old_columns)
     elif args.model_arch == "decoder":
         tokenized_dataset = dataset.map(preprocess_function_decoder, remove_columns=old_columns)
 
-    import pdb; pdb.set_trace()
-    collator = DataCollatorWithPadding(tokenizer=tokenizer)
+    #import pdb; pdb.set_trace()
+    #collator = DataCollatorWithPadding(tokenizer=tokenizer)
+    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
     # report metrics on val dataset as some of the datasets on glue do not have labels for the test dataset
     split_dataset = tokenized_dataset['train'].train_test_split(test_size=0.2, seed=args.fixed_seed_val)
     train_dataset = split_dataset['train']
