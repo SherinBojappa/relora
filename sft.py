@@ -196,7 +196,7 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer):
             input_ids = batch["input_ids"].unsqueeze(0).to(device)
             attention_mask = batch["attention_mask"].unsqueeze(0).to(device)
             output = model.generate(input_ids, attention_mask=attention_mask)
-            # need to decode the outputs because some
+            # remove input ids from generation
             generated_ids = output[:, len(input_ids[0]):]
             output_text = tokenizer.decode(generated_ids[0])
             first_word = output_text.strip().split(' ')[0].lower()
@@ -208,13 +208,12 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer):
                 all_predictions.append(-1)
 
             labels = batch["labels"]
-            all_labels.append(tasks_to_labels[task_name].index(output))
-            all_labels.append(labels)
+            all_labels.append(tasks_to_labels[task_name].index(labels))
 
-            metric = metric_mapping[task_name]
-            metric_function = evaluate.load(metric)
-            score = metric_function.compute(predictions=all_predictions, references=all_labels)
-            logger.info(f'Task: {task_name}, Metric: {metric}, Score: {score}')
+        metric = metric_mapping[task_name]
+        metric_function = evaluate.load(metric)
+        score = metric_function.compute(predictions=all_predictions, references=all_labels)
+        logger.info(f'Task: {task_name}, Metric: {metric}, Score: {score}')
 
 def main():
     args = parse_args()
