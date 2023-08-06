@@ -158,7 +158,7 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-def eval(model, val_dataloader, global_step, task_name=None):
+def eval(model, val_dataloader, global_step, args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     with torch.no_grad():
         model.eval()
@@ -170,62 +170,37 @@ def eval(model, val_dataloader, global_step, task_name=None):
             loss = outputs.loss
             # logits corresponding to </s> is ignored so just take first element
             #outputs.logist -> (batch_size, seq_len, vocab_size); seq len is 2 for label </s>
-            logits = outputs.logits[:, 0, :].argmax(dim=-1).cpu().numpy()
+            if args.arch_type == "encoder_deocer":
+                logits = outputs.logits[:, 0, :].argmax(dim=-1).cpu().numpy()
+                labels = batch["labels"][:, 0].cpu().numpy()
+                # implement the metric based on the task
+                metric = metric_mapping[task_name]
+                metric_function = evaluate.load(metric)
+                score = metric_function.compute(predictions=all_predictions, references=all_labels)
+                logger.info(f'Task: {args.task_name}, Metric: {metric}, Score: {score}')
+                wandb.log({"eval_loss": loss.item(), "step": global_step, "metric":score}, step=global_step)
+            elif args.arch_type == "decoder":
+                # becomes complicated for decoder model to get the metric using logits so use generate on the final model
+                wandb.log({"eval_loss": loss.item(), "step": global_step}, step=global_step)
 
+
+def evaluate_glue_decoder(model, test_dataloader, task_name):
+    # Evaluate the model on each GLUE task
+    with torch.no_grad():
+        model.eval()
+        all_predictions = []
+        all_labels = []
+        for batch in test_dataloader:
+            batch = batch.to(device)
+            output = model.generate(batch["input_ids"], batch["attention_masks"])
+            all_predictions.extend(output[0])
             labels = batch["labels"][:, 0].cpu().numpy()
-            all_predictions.extend(logits)
             all_labels.extend(labels)
-            # implement the metric based on the task
+
             metric = metric_mapping[task_name]
             metric_function = evaluate.load(metric)
             score = metric_function.compute(predictions=all_predictions, references=all_labels)
             logger.info(f'Task: {task_name}, Metric: {metric}, Score: {score}')
-            wandb.log({"eval_loss": loss.item(), "step": global_step, "metric":score}, step=global_step)
-
-
-def evaluate_glue(tokenizer, task_name=None):
-    # Evaluate the model on each GLUE task
-    with torch.no_grad():
-        model.eval()
-        for task in metric_mapping.keys():
-            # Load the dataset and metric
-            dataset = load_dataset('glue', task)
-            metrics = metric_mapping[task]
-            if not isinstance(metrics, list):
-                metrics = [metrics]
-            metric_functions = {metric: evaluate.load(metric) for metric in metrics}
-
-            collator = DataCollatorWithPadding(tokenizer=tokenizer)
-            # map label id to label string
-            if args.task_name == 'sts-b':
-                dataset = dataset.map(stsb, batched=True)
-            else:
-                glue_partial = partial(glue, benchmark_name=args.task_name, label_names=tasks_to_labels[args.task_name])
-                dataset = dataset.map(glue_partial, batched=True)
-
-            tokenized_dataset = dataset.map(preprocess_function, batched=True)
-
-            # Create a PyTorch data loader for the validation set
-            test_dataloader = torch.utils.data.DataLoader(tokenized_dataset['validation'], batch_size=args.batch_size, collate_fn=collator)
-
-            # Run the model on the validation set and compute the metrics
-            model.eval()
-            all_predictions = []
-            all_labels = []
-            for batch in val_dataloader:
-                with torch.no_grad():
-                    outputs = model(**batch)
-                    # logits corresponding to </s> is ignored so just take first element
-                    #outputs.logist -> (batch_size, seq_len, vocab_size); seq len is 2 for label </s>
-                    logits = outputs.logits[:, 0, :].argmax(dim=-1).cpu().numpy()
-                    labels = batch["labels"][:, 0].cpu().numpy()
-                    all_predictions.extend(logits)
-                    all_labels.extend(labels)
-
-            # Compute and print the metrics
-            for metric, metric_function in metric_functions.items():
-                score = metric_function.compute(predictions=all_predictions, references=all_labels)
-                logger.info(f'Task: {task}, Metric: {metric}, Score: {score}')
 
 def main():
     args = parse_args()
@@ -325,6 +300,16 @@ def main():
                 'attention_mask': inputs['attention_mask'].squeeze(0),
                 'labels': targets.squeeze(0)}
 
+    # for validation get the true label id
+    def preprocess_function_decoder_val(examples):
+        inputs = examples['inputs']
+        targets = examples['targets']
+        inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding=True, return_tensors='pt')
+        targets = tokenizer(targets, truncation=True, max_length=1, padding=False, return_tensors='pt')
+        return {'input_ids': inputs['input_ids'],
+                'attention_mask': inputs['attention_mask'],
+                'labels': targets['input_ids']}
+
     old_columns = dataset['train'].column_names
     if args.model_arch == "encoder-decoder":
         tokenized_dataset = dataset.map(preprocess_function_encoder_decoder, batched=True, remove_columns=old_columns)
@@ -342,6 +327,14 @@ def main():
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collator)
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, collate_fn=collator)
 
+    # for the val dataloader we do not need the inputs to have the targets and the targets need to be separate
+    # so redo the tokenization
+    if args.model_arch == "decoder":
+        old_columns = dataset["val"].columns
+        tokenized_dataset_test = dataset["val"].map(preprocess_function_decoder_val, remove_columns=old_columns)
+        test_dataloader = torch.utils.data.DataLoader(tokenized_dataset_test, batch_size=args.batch_size, collate_fn=collator)
+    else:
+        test_dataloader = torch.utils.data.DataLoader(tokenized_dataset['val'], batch_size=args.batch_size, collate_fn=collator)
 
     # training loop
     global_step = 0
@@ -349,7 +342,6 @@ def main():
         for batch in train_dataloader:
             global_step += 1
             model.train()
-            import pdb; pdb.set_trace()
             optimizer.zero_grad()
             batch = batch.to(device)
             outputs = model(**batch)
@@ -375,12 +367,14 @@ def main():
 
             if global_step % args.eval_every == 0:
                 logger.info(f"Computing the evaluation")
-                eval(model, val_dataloader, global_step, args.task_name)
+                eval(model, val_dataloader, global_step, args)
 
     logger.info("Finished fine tuning")
 
-    # evaluate all glue datasets on the fine tuned model
-    #evaluate_glue(test_dataloader, args.task_name)
+    # evaluate glue dataset on the fine tuned model
+    if args.arch_type == "decoder":
+        evaluate_glue_decoder(model, test_dataloader, args.task_name)
+
     wandb.finish()
 
 if __name__ == "__main__":
