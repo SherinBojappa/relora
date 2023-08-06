@@ -3,6 +3,7 @@ import time
 import argparse
 import random
 from functools import partial
+from collections import namedtuple
 
 import wandb
 import numpy as np
@@ -184,26 +185,31 @@ def eval(model, val_dataloader, global_step, args):
                 wandb.log({"eval_loss": loss.item(), "step": global_step}, step=global_step)
 
 
-def evaluate_glue_decoder(model, test_dataloader, task_name):
+def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     # Evaluate the model on each GLUE task
     with torch.no_grad():
         model.eval()
         all_predictions = []
         all_labels = []
         for batch in test_dataloader:
-            batch = batch.to(device)
-            output = model.generate(batch["input_ids"], batch["attention_masks"])
+            input_ids = batch["input_ids"].unsqueeze(0).to(device)
+            attention_mask = batch["attention_mask"].unsqueeze(0).to(device)
+            output = model.generate(input_ids, attention_mask=attention_mask)
             # need to decode the outputs because some
-            output = tokenizer.decode(output)
-            if output in tasks_to_labels[task_name]:
-                all_predictions.extend(tasks_to_labels[task_name].index(output))
+            generated_ids = output[:, len(input_ids[0]):]
+            output_text = tokenizer.decode(generated_ids[0])
+            first_word = output_text.strip().split(' ')[0].lower()
+            # get the first word
+            if output_text in tasks_to_labels[task_name]:
+                all_predictions.append(tasks_to_labels[task_name].index(first_word))
             else:
                 # prediction is something else
-                all_predictions.extend(-1)
+                all_predictions.append(-1)
 
-            labels = batch["labels"].cpu()
-            all_labels.extend(tasks_to_labels[task_name].index(output))
-            all_labels.extend(labels)
+            labels = batch["labels"]
+            all_labels.append(tasks_to_labels[task_name].index(output))
+            all_labels.append(labels)
 
             metric = metric_mapping[task_name]
             metric_function = evaluate.load(metric)
@@ -334,10 +340,14 @@ def main():
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collator)
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, collate_fn=collator)
 
-    def custom_collator(batch):
-        # Since the batch size is 1, you can simply return the first item in the batch
-        return batch[0]
 
+    def custom_collator(batch_samples):
+        sample = batch_samples[0]  # Since batch size is 1, get the only sample
+        return {
+            "input_ids": torch.tensor(sample['input_ids']),
+            "attention_mask": torch.tensor(sample['attention_mask']),
+            "labels": sample['labels'],
+        }
 
     # for the val dataloader we do not need the inputs to have the targets and the targets need to be separate
     # so redo the tokenization
@@ -387,8 +397,7 @@ def main():
 
     # evaluate glue dataset on the fine tuned model
     if args.model_arch == "decoder":
-
-        evaluate_glue_decoder(model, test_dataloader, args.task_name)
+        evaluate_glue_decoder(model, test_dataloader, args.task_name, tokenizer)
 
     wandb.finish()
 
