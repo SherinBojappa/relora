@@ -259,6 +259,7 @@ def main():
         #params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         params = sum(p.numel() for p in params_to_update)
         logger.info(f"Number of trainable parameters: {params}")
+        # lora -> reset freq large
         optimizer = torch.optim.Adam((p for p in model.parameters() if p.requires_grad), lr=args.learning_rate)
         lr_scheduler = get_ragged_cosine_schedule(optimizer=optimizer, num_training_steps=args.num_training_steps, \
                                                   first_warmup_steps=args.first_warmup_steps, \
@@ -272,6 +273,7 @@ def main():
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
     #tokenizer = T5Tokenizer.from_pretrained(args.model)
     logger.info(f"Loaded model: {args.model}")
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -308,6 +310,7 @@ def main():
         # it isnt present in tokenizer(examples['inputs']+examples['targets'])
         # hence subtract -1
         #print(len(tokenizer(examples['inputs'])['input_ids'])) # 14
+
         mask[:len(tokenizer(examples['inputs'])['input_ids'])-1] = True
 
         targets = inputs['input_ids'].clone()
@@ -328,9 +331,9 @@ def main():
     elif args.model_arch == "decoder":
         tokenized_dataset = dataset.map(preprocess_function_decoder, remove_columns=old_columns)
 
-    #import pdb; pdb.set_trace()
-    #collator = DataCollatorWithPadding(tokenizer=tokenizer)
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    #do not use DataCollatorForLanguageModeling as this overwrites labels with the input ids,
+    #however replacing pad tokens with -100 is not done in DataCollatorWithPadding, so do it before calling this
+    collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
     # report metrics on val dataset as some of the datasets on glue do not have labels for the test dataset
     split_dataset = tokenized_dataset['train'].train_test_split(test_size=0.2, seed=args.fixed_seed_val)
@@ -346,6 +349,7 @@ def main():
         for batch in train_dataloader:
             global_step += 1
             model.train()
+            import pdb; pdb.set_trace()
             optimizer.zero_grad()
             batch = batch.to(device)
             outputs = model(**batch)
