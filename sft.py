@@ -110,7 +110,7 @@ def parse_args():
 
     parser.add_argument("--num_epochs",
                         type=int,
-                        default=3,
+                        default=1,
                         help="Number of epochs to fine tune for")
 
     parser.add_argument("--eval_every",
@@ -136,7 +136,7 @@ def parse_args():
 
     parser.add_argument("--relora_frequency",
                         type=int,
-                        default=100,
+                        default=20_000,
                         help="Frequency of ReLoRA")
 
     parser.add_argument("--num_training_steps",
@@ -170,7 +170,7 @@ def eval(model, val_dataloader, global_step, args):
             loss = outputs.loss
             # logits corresponding to </s> is ignored so just take first element
             #outputs.logist -> (batch_size, seq_len, vocab_size); seq len is 2 for label </s>
-            if args.arch_type == "encoder_deocer":
+            if args.model_arch == "encoder_decoder":
                 logits = outputs.logits[:, 0, :].argmax(dim=-1).cpu().numpy()
                 labels = batch["labels"][:, 0].cpu().numpy()
                 # implement the metric based on the task
@@ -179,7 +179,7 @@ def eval(model, val_dataloader, global_step, args):
                 score = metric_function.compute(predictions=all_predictions, references=all_labels)
                 logger.info(f'Task: {args.task_name}, Metric: {metric}, Score: {score}')
                 wandb.log({"eval_loss": loss.item(), "step": global_step, "metric":score}, step=global_step)
-            elif args.arch_type == "decoder":
+            elif args.model_arch == "decoder":
                 # becomes complicated for decoder model to get the metric using logits so use generate on the final model
                 wandb.log({"eval_loss": loss.item(), "step": global_step}, step=global_step)
 
@@ -193,8 +193,16 @@ def evaluate_glue_decoder(model, test_dataloader, task_name):
         for batch in test_dataloader:
             batch = batch.to(device)
             output = model.generate(batch["input_ids"], batch["attention_masks"])
-            all_predictions.extend(output[0])
-            labels = batch["labels"][:, 0].cpu().numpy()
+            # need to decode the outputs because some
+            output = tokenizer.decode(output)
+            if output in tasks_to_labels[task_name]:
+                all_predictions.extend(tasks_to_labels[task_name].index(output))
+            else:
+                # prediction is something else
+                all_predictions.extend(-1)
+
+            labels = batch["labels"].cpu()
+            all_labels.extend(tasks_to_labels[task_name].index(output))
             all_labels.extend(labels)
 
             metric = metric_mapping[task_name]
@@ -300,15 +308,14 @@ def main():
                 'attention_mask': inputs['attention_mask'].squeeze(0),
                 'labels': targets.squeeze(0)}
 
-    # for validation get the true label id
+    # for validation do not tokenize the label
     def preprocess_function_decoder_val(examples):
         inputs = examples['inputs']
         targets = examples['targets']
-        inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding=True, return_tensors='pt')
-        targets = tokenizer(targets, truncation=True, max_length=1, padding=False, return_tensors='pt')
-        return {'input_ids': inputs['input_ids'],
-                'attention_mask': inputs['attention_mask'],
-                'labels': targets['input_ids']}
+        inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding=False, return_tensors='pt')
+        return {'input_ids': inputs['input_ids'].squeeze(0),
+                'attention_mask': inputs['attention_mask'].squeeze(0),
+                'labels': examples["targets"]}
 
     old_columns = dataset['train'].column_names
     if args.model_arch == "encoder-decoder":
@@ -327,14 +334,19 @@ def main():
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collator)
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, collate_fn=collator)
 
+    def custom_collator(batch):
+        # Since the batch size is 1, you can simply return the first item in the batch
+        return batch[0]
+
+
     # for the val dataloader we do not need the inputs to have the targets and the targets need to be separate
     # so redo the tokenization
     if args.model_arch == "decoder":
-        old_columns = dataset["val"].columns
-        tokenized_dataset_test = dataset["val"].map(preprocess_function_decoder_val, remove_columns=old_columns)
-        test_dataloader = torch.utils.data.DataLoader(tokenized_dataset_test, batch_size=args.batch_size, collate_fn=collator)
+        old_columns = dataset["validation"].column_names
+        tokenized_dataset_test = dataset["validation"].map(preprocess_function_decoder_val, remove_columns=old_columns)
+        test_dataloader = torch.utils.data.DataLoader(tokenized_dataset_test, batch_size=1, collate_fn=custom_collator)
     else:
-        test_dataloader = torch.utils.data.DataLoader(tokenized_dataset['val'], batch_size=args.batch_size, collate_fn=collator)
+        test_dataloader = torch.utils.data.DataLoader(tokenized_dataset_test, batch_size=args.batch_size, collate_fn=collator)
 
     # training loop
     global_step = 0
@@ -369,10 +381,13 @@ def main():
                 logger.info(f"Computing the evaluation")
                 eval(model, val_dataloader, global_step, args)
 
+            break
+
     logger.info("Finished fine tuning")
 
     # evaluate glue dataset on the fine tuned model
-    if args.arch_type == "decoder":
+    if args.model_arch == "decoder":
+
         evaluate_glue_decoder(model, test_dataloader, args.task_name)
 
     wandb.finish()
