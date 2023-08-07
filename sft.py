@@ -192,6 +192,7 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer):
         model.eval()
         all_predictions = []
         all_labels = []
+        logger.info(f"Generated words")
         for batch in test_dataloader:
             input_ids = batch["input_ids"].unsqueeze(0).to(device)
             attention_mask = batch["attention_mask"].unsqueeze(0).to(device)
@@ -201,7 +202,7 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer):
             output_text = tokenizer.decode(generated_ids[0])
             first_word = output_text.strip().split(' ')[0].lower()
             # get the first word
-            if output_text in tasks_to_labels[task_name]:
+            if first_word in tasks_to_labels[task_name]:
                 all_predictions.append(tasks_to_labels[task_name].index(first_word))
             else:
                 # prediction is something else
@@ -209,6 +210,8 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer):
 
             labels = batch["labels"]
             all_labels.append(tasks_to_labels[task_name].index(labels))
+            logger.info(f"Predicted First Word: {first_word}; Actual First Word {labels}")
+
 
         metric = metric_mapping[task_name]
         metric_function = evaluate.load(metric)
@@ -389,8 +392,6 @@ def main():
             if global_step % args.eval_every == 0:
                 logger.info(f"Computing the evaluation")
                 eval(model, val_dataloader, global_step, args)
-
-            break
 
     logger.info("Finished fine tuning")
 
