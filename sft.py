@@ -159,15 +159,22 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-def eval(model, val_dataloader, global_step, args):
+def eval(model, val_dataloader, global_step, args, tokenizer):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     with torch.no_grad():
         model.eval()
         all_predictions = []
         all_labels = []
         for batch in val_dataloader:
-            batch = batch.to(device)
-            outputs = model(**batch)
+            # batch for decoder only models have additional parameters as inputs for generator
+            if args.model_arch == "encoder_decoder":
+                batch = batch.to(device)
+                outputs = model(**batch)
+            elif args.model_arch == "decoder":
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                labels = batch["labels"].to(device)
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
             # logits corresponding to </s> is ignored so just take first element
             #outputs.logist -> (batch_size, seq_len, vocab_size); seq len is 2 for label </s>
@@ -182,10 +189,12 @@ def eval(model, val_dataloader, global_step, args):
                 wandb.log({"eval_loss": loss.item(), "step": global_step, "metric":score}, step=global_step)
             elif args.model_arch == "decoder":
                 # becomes complicated for decoder model to get the metric using logits so use generate on the final model
-                wandb.log({"eval_loss": loss.item(), "step": global_step}, step=global_step)
+                score = evaluate_glue_decoder(model, val_dataloader, args.task_name, tokenizer, args)
+                metric_name = metric_mapping[args.task_name]
+                wandb.log({"eval_loss": loss.item(), metric_name: score, "step": global_step}, step=global_step)
 
 
-def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer):
+def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Evaluate the model on each GLUE task
     with torch.no_grad():
@@ -194,24 +203,33 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer):
         all_labels = []
         logger.info(f"Generated words")
         for batch in test_dataloader:
-            input_ids = batch["input_ids"].unsqueeze(0).to(device)
-            attention_mask = batch["attention_mask"].unsqueeze(0).to(device)
-            output = model.generate(input_ids, attention_mask=attention_mask)
-            # remove input ids from generation
-            generated_ids = output[:, len(input_ids[0]):]
-            output_text = tokenizer.decode(generated_ids[0])
-            first_word = output_text.strip().split(' ')[0].lower()
-            # get the first word
-            if first_word in tasks_to_labels[task_name]:
-                all_predictions.append(tasks_to_labels[task_name].index(first_word))
-            else:
-                # prediction is something else
-                all_predictions.append(-1)
+            # do not need to add an extra dimension now that we have batch generate
+            input_ids = batch["input_ids_generate"].to(device)
+            attention_mask = batch["attention_mask_generate"].to(device)
+            labels = batch["targets_generate"].to(device)
+            max_token_length = 20
+            output = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_token_length, num_beams=3, early_stopping=True)
+            # remove input ids from generation - need to be dynamic
+            # input_ids are already padding to max length so remove them from the generated outputs
+            generated_ids = output[:, args.max_length:]
+            # you will need to iterate over each generated id to get the decoding
+            for idx, generation in enumerate(generated_ids):
+                output_text = tokenizer.decode(generation)
+                # ideally output_text should be the same as the first word since we have trained the model with it
+                # so ignore first_word search, if it is not we may need to add back the first word search
+                # extract the first word as you get something like positive :positive :
+                generated_strings = output_text.strip().lower().split(" ")
 
-            labels = batch["labels"]
-            all_labels.append(tasks_to_labels[task_name].index(labels))
-            logger.info(f"Predicted First Word: {first_word}; Actual First Word {labels}")
+                decoded_labels = tokenizer.decode(labels[idx], skip_special_tokens=True)
+                label_index = -1
+                # you will always have one decoded_label even for strings like not_entailment
+                if decoded_labels in generated_strings:
+                    label_index = tasks_to_labels[task_name].index(decoded_labels)
 
+                all_predictions.append(label_index)
+
+                logger.info(f"Predicted text: {output_text} Actual label: {decoded_labels}")
+                all_labels.append(tasks_to_labels[task_name].index(decoded_labels))
 
         metric = metric_mapping[task_name]
         metric_function = evaluate.load(metric)
@@ -264,6 +282,8 @@ def main():
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+        # have left padding instead of right padding
+        tokenizer.padding_side = "left"
 
     #tokenizer = T5Tokenizer.from_pretrained(args.model)
     logger.info(f"Loaded model: {args.model}")
@@ -292,33 +312,45 @@ def main():
                 'labels': targets['input_ids']}
 
     def preprocess_function_decoder(examples):
-        inputs = examples['inputs'] + examples['targets']
+        # add a separator between inputs and targets for the model to learn when to predict the targets
+        inputs = examples['inputs'] + ":" + examples['targets']
         inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding="max_length", return_tensors='pt')
+        # ignore the mask for now so now you have all the next word predictions in your loss, if including the mask
+        # you need to account for labels that are greater than 1 token long
+
         # Create a mask where the elements corresponding to example['inputs'] are True
-        mask = torch.full((len(inputs['input_ids'][0]),), fill_value=False, dtype=torch.bool)
+        #mask = torch.full((len(inputs['input_ids'][0]),), fill_value=False, dtype=torch.bool)
 
         # there is a space in the end added to tokenizer(examples['inputs'])
         # it isnt present in tokenizer(examples['inputs']+examples['targets'])
         # hence subtract -1
         #print(len(tokenizer(examples['inputs'])['input_ids'])) # 14
-
-        mask[:len(tokenizer(examples['inputs'])['input_ids'])-1] = True
+        #len_inputs = len(tokenizer(examples['inputs']))
+        #mask[:len_inputs] = True
 
         targets = inputs['input_ids'].clone()
 
         # pad tokens are ignored in the loss
         targets[targets == tokenizer.pad_token_id] = -100
 
+        # create another set of inputs and targets to be used by the generate function
+        inputs_generate = examples['inputs'] + ":"
+        inputs_generate = tokenizer(inputs_generate, truncation=True, max_length=args.max_length, padding="max_length", return_tensors='pt')
+        targets_generate =  tokenizer(examples['targets'], truncation=True, max_length=args.max_length, padding="max_length", return_tensors="pt")
         # inputs are also ignored in the loss
-        targets[mask.unsqueeze(0)] = -100
+        #targets[mask.unsqueeze(0)] = -100
 
         return {'input_ids': inputs['input_ids'].squeeze(0),
                 'attention_mask': inputs['attention_mask'].squeeze(0),
-                'labels': targets.squeeze(0)}
+                'labels': targets.squeeze(0),
+                'input_ids_generate': inputs_generate['input_ids'].squeeze(0),
+                'attention_mask_generate': inputs_generate['attention_mask'].squeeze(0),
+                'targets_generate': targets_generate["input_ids"].squeeze(0)}
 
     # for validation do not tokenize the label
     def preprocess_function_decoder_val(examples):
-        inputs = examples['inputs']
+        # separator ":" used to separate inputs from target
+        inputs = examples['inputs'] + ":"
         targets = examples['targets']
         inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding=False, return_tensors='pt')
         return {'input_ids': inputs['input_ids'].squeeze(0),
@@ -339,10 +371,13 @@ def main():
     split_dataset = tokenized_dataset['train'].train_test_split(test_size=0.2, seed=args.fixed_seed_val)
     train_dataset = split_dataset['train']
     val_dataset = split_dataset['test']
+    test_dataset = tokenized_dataset['validation']
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collator)
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, collate_fn=collator)
+    test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=collator)
 
-
+    # for now we do not need a custom collator as we are using model.generate with left padding and an entire batch
+    """
     def custom_collator(batch_samples):
         sample = batch_samples[0]  # Since batch size is 1, get the only sample
         return {
@@ -359,6 +394,7 @@ def main():
         test_dataloader = torch.utils.data.DataLoader(tokenized_dataset_test, batch_size=1, collate_fn=custom_collator)
     else:
         test_dataloader = torch.utils.data.DataLoader(tokenized_dataset_test, batch_size=args.batch_size, collate_fn=collator)
+    """
 
     # training loop
     global_step = 0
@@ -367,8 +403,10 @@ def main():
             global_step += 1
             model.train()
             optimizer.zero_grad()
-            batch = batch.to(device)
-            outputs = model(**batch)
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
             loss.backward()
             if args.relora:
@@ -391,13 +429,14 @@ def main():
 
             if global_step % args.eval_every == 0:
                 logger.info(f"Computing the evaluation")
-                eval(model, val_dataloader, global_step, args)
+                eval(model, val_dataloader, global_step, args, tokenizer)
+            #TODO remove this later on for debugging purposes only
 
     logger.info("Finished fine tuning")
 
     # evaluate glue dataset on the fine tuned model
     if args.model_arch == "decoder":
-        evaluate_glue_decoder(model, test_dataloader, args.task_name, tokenizer)
+        evaluate_glue_decoder(model, test_dataloader, args.task_name, tokenizer, args)
 
     wandb.finish()
 
