@@ -162,6 +162,11 @@ def parse_args():
                        default=None,
                        help="Default tokenizer to use")
 
+    parser.add_argument("--accumulation_steps",
+                       type=int,
+                       default=4,
+                       help="Perform optimization every accumulation_steps mini batches")
+
 
     args = parser.parse_args()
     return args
@@ -245,13 +250,13 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
                     label_index = tasks_to_labels[task_name].index(decoded_labels)
 
                 all_predictions.append(label_index)
+                all_labels.append(tasks_to_labels[task_name].index(decoded_labels))
                 # log first batch
                 if batch_idx == 0:
                     logger.info(f"Actual Input {tokenizer.decode(input_ids[idx])}")
                     logger.info(f"Predicted text: {output_text} Actual label: {decoded_labels}")
                     logger.info(f"All predictions {all_predictions}")
                     logger.info(f"all labels {all_labels}")
-                all_labels.append(tasks_to_labels[task_name].index(decoded_labels))
 
         metric = metric_mapping[task_name]
         metric_function = evaluate.load(metric)
@@ -343,11 +348,13 @@ def main():
 
     dataset = load_dataset(args.dataset, args.task_name)
     # TODO - remove this code that tests on very few samples
-    #smaller_dataset = DatasetDict()
-    #for split in dataset.keys():
-    #    subset_size = 100
-    #    smaller_dataset[split] = dataset[split].shuffle(seed=42).select(range(subset_size))
-    #dataset = smaller_dataset
+    """
+    smaller_dataset = DatasetDict()
+    for split in dataset.keys():
+        subset_size = 200
+        smaller_dataset[split] = dataset[split].shuffle(seed=42).select(range(subset_size))
+    dataset = smaller_dataset
+    """
 
     # map label id to label string
     #if args.model_arch == "t5-3b":
@@ -468,7 +475,8 @@ def main():
     patience_counter = 0
     max_patience = 2
     for epoch in tqdm(range(args.num_epochs)):
-        for batch in train_dataloader:
+        accumulated_loss = 0.0
+        for batch_idx, batch in enumerate(train_dataloader):
             global_step += 1
             model.train()
             optimizer.zero_grad()
@@ -477,22 +485,31 @@ def main():
             labels = batch["labels"].to(device)
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
+            # Accumulate loss
+            accumulated_loss += loss.item()
+             # Backward pass (accumulate gradients)
             loss.backward()
-            optimizer.step()
-            lr_scheduler.step()
+
+            if (batch_idx + 1) % args.accumulation_steps == 0:
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                # Reset accumulated loss
+                #logger.info(f"optimization on {batch_idx}")
+                accumulated_loss = 0.0
 
             # relora merge weights, reinit weights and reset optimizer
-            if global_step % args.relora_frequency == 0:
-                merge_and_reinit_functional(model)
-                reset_optimizer(optimizer, reset_params=params_to_update, pruning_amount=0.9)
+            #if global_step % args.relora_frequency == 0:
+                #merge_and_reinit_functional(model)
+                #reset_optimizer(optimizer, reset_params=params_to_update, pruning_amount=0.9)
 
-            wandb.log(
-                {"train_loss": loss.item(),
-                "step": global_step,
-                "epoch": epoch,
-                "learning_rate": optimizer.param_groups[0]["lr"]},
-                step=global_step
-            )
+                wandb.log(
+                    {"train_loss": loss.item(),
+                    "step": global_step,
+                    "epoch": epoch,
+                    "learning_rate": optimizer.param_groups[0]["lr"]},
+                    step=global_step
+                )
 
         logger.info(f"Computing the evaluation")
         current_score = eval(model, val_dataloader, global_step, args, tokenizer)
