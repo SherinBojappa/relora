@@ -16,6 +16,7 @@ from transformers import AutoModelForMaskedLM, AutoModelForCausalLM, T5ForCondit
 from tqdm import tqdm
 import evaluate
 import torch
+import torch.nn as nn
 
 from preprocessors import glue, stsb, string_to_float
 from functional import wrap_with_ReLoRa, merge_and_reinit_functional
@@ -155,12 +156,19 @@ def parse_args():
                        default=10,
                        help="Number of restart warmup steps to perform")
 
+    parser.add_argument("--tokenizer",
+                       type=str,
+                       default=None,
+                       help="Default tokenizer to use")
+
 
     args = parser.parse_args()
     return args
 
 def eval(model, val_dataloader, global_step, args, tokenizer):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    #device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
+    model = model.to(device)
     with torch.no_grad():
         model.eval()
         all_predictions = []
@@ -195,7 +203,8 @@ def eval(model, val_dataloader, global_step, args, tokenizer):
 
 
 def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    #device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
     # Evaluate the model on each GLUE task
     with torch.no_grad():
         model.eval()
@@ -204,6 +213,7 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
         logger.info(f"Generated words")
         for batch in test_dataloader:
             # do not need to add an extra dimension now that we have batch generate
+
             input_ids = batch["input_ids_generate"].to(device)
             attention_mask = batch["attention_mask_generate"].to(device)
             labels = batch["targets_generate"].to(device)
@@ -275,15 +285,42 @@ def main():
                                                   restart_warmup_steps = args.restart_warmup_steps, \
                                                   reset_freq=args.relora_frequency)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    #model = model.to(device=device, dtype=torch.bfloat16)
-    model = model.to(device=device)
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
+
+    if args.tokenizer is None:
+        # load tokenizer correponding to the model
+        tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, use_fast=True, model_max_length=model.config.max_position_embeddings)
+        #if args.tokenizer == "t5-base":
+            #tokenizer.model_max_length = args.max_length
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-        # have left padding instead of right padding
-        tokenizer.padding_side = "left"
+
+    # have left padding instead of right padding
+    tokenizer.padding_side = "left"
+
+    # hack to get away with mismatched size embedding layer and tokenizer vocab size only for t5-base and llama model
+    if args.tokenizer == "t5-base":
+        new_vocab_size = tokenizer.vocab_size
+        #LlamaForCausalLM class doesn't have a method named resize_token_embeddings, so manually copy over embeddings
+        #model.resize.token_embeddings(new_vocab_size)
+        # Get the current embedding layer
+        old_embedding = model.model.embed_tokens
+        old_embedding_size = old_embedding.weight.size(0)
+        # Create a new embedding layer with the new vocabulary size
+        embedding_dim = old_embedding.weight.size(1)
+        new_embedding = nn.Embedding(new_vocab_size, embedding_dim)
+        # Copy the existing weights from the old embedding layer
+        new_embedding.weight.data[:old_embedding_size] = old_embedding.weight.data
+        # Replace the old embedding layer with the new one
+        model.model.embed_tokens = new_embedding
+        assert model.model.embed_tokens.weight.size()[0] == tokenizer.vocab_size
+        logger.info(f"Resized the embedding layer of the model to match with the tokenizer")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    #model = model.to(device=device, dtype=torch.bfloat16)
+    model = model.to(device=device)
 
     #tokenizer = T5Tokenizer.from_pretrained(args.model)
     logger.info(f"Loaded model: {args.model}")
@@ -335,7 +372,7 @@ def main():
 
         # create another set of inputs and targets to be used by the generate function
         inputs_generate = examples['inputs'] + ":"
-        inputs_generate = tokenizer(inputs_generate, truncation=True, max_length=args.max_length, padding="max_length", return_tensors='pt')
+        inputs_generate = tokenizer(inputs_generate, add_special_tokens=False, truncation=True, max_length=args.max_length, padding="max_length", return_tensors='pt')
         targets_generate =  tokenizer(examples['targets'], truncation=True, max_length=args.max_length, padding="max_length", return_tensors="pt")
         # inputs are also ignored in the loss
         #targets[mask.unsqueeze(0)] = -100
