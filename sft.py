@@ -10,7 +10,7 @@ import numpy as np
 from loguru import logger
 import transformers
 from transformers import AutoTokenizer, DataCollatorForLanguageModeling
-from datasets import load_dataset, load_metric
+from datasets import load_dataset, load_metric, DatasetDict
 from transformers.data.data_collator import DataCollatorWithPadding
 from transformers import AutoModelForMaskedLM, AutoModelForCausalLM, T5ForConditionalGeneration
 from tqdm import tqdm
@@ -118,7 +118,7 @@ def parse_args():
 
     parser.add_argument("--eval_every",
                         type=int,
-                        default=100,
+                        default=1000,
                         help="Number of steps between evaluations")
 
     parser.add_argument("--max_length",
@@ -170,10 +170,12 @@ def eval(model, val_dataloader, global_step, args, tokenizer):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     #device = "cpu"
     model = model.to(device)
+    metric_name = metric_mapping[args.task_name]
     with torch.no_grad():
         model.eval()
         all_predictions = []
         all_labels = []
+        total_score = 0
         for batch in val_dataloader:
             # batch for decoder only models have additional parameters as inputs for generator
             if args.model_arch == "encoder_decoder":
@@ -194,14 +196,18 @@ def eval(model, val_dataloader, global_step, args, tokenizer):
                 metric = metric_mapping[task_name]
                 metric_function = evaluate.load(metric)
                 score = metric_function.compute(predictions=all_predictions, references=all_labels)
+                total_score += score
                 logger.info(f'Task: {args.task_name}, Metric: {metric}, Score: {score}')
                 wandb.log({"eval_loss": loss.item(), "step": global_step, "metric":score}, step=global_step)
             elif args.model_arch == "decoder":
                 # becomes complicated for decoder model to get the metric using logits so use generate on the final model
                 score = evaluate_glue_decoder(model, val_dataloader, args.task_name, tokenizer, args)
-                metric_name = metric_mapping[args.task_name]
-                wandb.log({"eval_loss": loss.item(), metric_name: score, "step": global_step}, step=global_step)
+                total_score += score[metric_name]
 
+
+        overall_score = total_score/len(val_dataloader)
+        wandb.log({"eval_loss": loss.item(), metric_name: overall_score, "step": global_step}, step=global_step)
+        return overall_score
 
 def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -211,7 +217,7 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
         model.eval()
         all_predictions = []
         all_labels = []
-        logger.info(f"Generated words")
+        #logger.info(f"Generated words")
         for batch in test_dataloader:
             # do not need to add an extra dimension now that we have batch generate
 
@@ -240,13 +246,14 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
 
                 all_predictions.append(label_index)
                 #logger.info(f"Actual Input {tokenizer.decode(input_ids[idx])}")
-                logger.info(f"Predicted text: {output_text} Actual label: {decoded_labels}")
+                #logger.info(f"Predicted text: {output_text} Actual label: {decoded_labels}")
                 all_labels.append(tasks_to_labels[task_name].index(decoded_labels))
 
         metric = metric_mapping[task_name]
         metric_function = evaluate.load(metric)
         score = metric_function.compute(predictions=all_predictions, references=all_labels)
         logger.info(f'Task: {task_name}, Metric: {metric}, Score: {score}')
+    return score
 
 def main():
     args = parse_args()
@@ -331,6 +338,13 @@ def main():
     logger.info(f"Number of trainable parameters: {params}")
 
     dataset = load_dataset(args.dataset, args.task_name)
+    # TODO - remove this code that tests on very few samples
+    #smaller_dataset = DatasetDict()
+    #for split in dataset.keys():
+    #    subset_size = 100
+    #    smaller_dataset[split] = dataset[split].shuffle(seed=42).select(range(subset_size))
+    #dataset = smaller_dataset
+
     # map label id to label string
     #if args.model_arch == "t5-3b":
     if args.task_name == 'sts-b':
@@ -408,13 +422,16 @@ def main():
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
     # report metrics on val dataset as some of the datasets on glue do not have labels for the test dataset
-    split_dataset = tokenized_dataset['train'].train_test_split(test_size=0.2, seed=args.fixed_seed_val)
+    split_dataset = tokenized_dataset['train'].train_test_split(test_size=0.05, seed=args.fixed_seed_val)
     train_dataset = split_dataset['train']
     val_dataset = split_dataset['test']
     test_dataset = tokenized_dataset['validation']
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collator)
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, collate_fn=collator)
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=collator)
+    logger.info(f"The length of the train dataloader is {len(train_dataloader)}")
+    logger.info(f"The length of the validation dataloader is {len(val_dataloader)}")
+    logger.info(f"The length of the test dataloader is {len(test_dataloader)}")
 
     if args.relora is False:
         total_steps = args.num_epochs * len(train_dataloader)
@@ -443,6 +460,9 @@ def main():
 
     # training loop
     global_step = 0
+    best_score = 0
+    patience_counter = 0
+    max_patience = 2
     for epoch in tqdm(range(args.num_epochs)):
         for batch in train_dataloader:
             global_step += 1
@@ -470,17 +490,28 @@ def main():
                 step=global_step
             )
 
-            if global_step % args.eval_every == 0:
-                logger.info(f"Computing the evaluation")
-                eval(model, val_dataloader, global_step, args, tokenizer)
-            #TODO remove this later on for debugging purposes only
-            break
+        logger.info(f"Computing the evaluation")
+        current_score = eval(model, val_dataloader, global_step, args, tokenizer)
+        if current_score >= best_score:
+            best_score = current_score
+            logger.info(f"Best Model Score is {best_score}")
+            model.save_pretrained(f"best_model_{args.task_name}")
+        else:
+            patience_counter += 1
+            if patience_counter >= max_patience:
+                print(f"No improvement after", {max_patience}, "epochs. Stopping training.")
+                break
 
+            #TODO remove this later on for debugging purposes only
     logger.info("Finished fine tuning")
 
-    # evaluate glue dataset on the fine tuned model
+    # evaluate on the validation dataset
     if args.model_arch == "decoder":
-        evaluate_glue_decoder(model, test_dataloader, args.task_name, tokenizer, args)
+        # load best model
+        model = ARCH_TO_CLASS[args.model_arch].from_pretrained(f"best_model_{args.task_name}")
+        model = model.to(device)
+        score = evaluate_glue_decoder(model, test_dataloader, args.task_name, tokenizer, args)
+        logger.info(f"The best metric on the validation dataset is {score}")
 
     wandb.finish()
 
