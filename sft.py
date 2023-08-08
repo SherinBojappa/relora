@@ -17,6 +17,7 @@ from tqdm import tqdm
 import evaluate
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import OneCycleLR
 
 from preprocessors import glue, stsb, string_to_float
 from functional import wrap_with_ReLoRa, merge_and_reinit_functional
@@ -166,8 +167,8 @@ def parse_args():
     return args
 
 def eval(model, val_dataloader, global_step, args, tokenizer):
-    #device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    #device = "cpu"
     model = model.to(device)
     with torch.no_grad():
         model.eval()
@@ -203,8 +204,8 @@ def eval(model, val_dataloader, global_step, args, tokenizer):
 
 
 def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
-    #device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    #device = "cpu"
     # Evaluate the model on each GLUE task
     with torch.no_grad():
         model.eval()
@@ -218,7 +219,8 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
             attention_mask = batch["attention_mask_generate"].to(device)
             labels = batch["targets_generate"].to(device)
             max_token_length = 20
-            output = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_token_length, num_beams=3, early_stopping=True)
+            pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+            output = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_token_length, pad_token_id=pad_token_id, num_beams=3, early_stopping=True)
             # remove input ids from generation - need to be dynamic
             # input_ids are already padding to max length so remove them from the generated outputs
             generated_ids = output[:, args.max_length:]
@@ -237,7 +239,7 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
                     label_index = tasks_to_labels[task_name].index(decoded_labels)
 
                 all_predictions.append(label_index)
-
+                #logger.info(f"Actual Input {tokenizer.decode(input_ids[idx])}")
                 logger.info(f"Predicted text: {output_text} Actual label: {decoded_labels}")
                 all_labels.append(tasks_to_labels[task_name].index(decoded_labels))
 
@@ -301,6 +303,7 @@ def main():
     tokenizer.padding_side = "left"
 
     # hack to get away with mismatched size embedding layer and tokenizer vocab size only for t5-base and llama model
+    """
     if args.tokenizer == "t5-base":
         new_vocab_size = tokenizer.vocab_size
         #LlamaForCausalLM class doesn't have a method named resize_token_embeddings, so manually copy over embeddings
@@ -317,7 +320,7 @@ def main():
         model.model.embed_tokens = new_embedding
         assert model.model.embed_tokens.weight.size()[0] == tokenizer.vocab_size
         logger.info(f"Resized the embedding layer of the model to match with the tokenizer")
-
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     #model = model.to(device=device, dtype=torch.bfloat16)
     model = model.to(device=device)
@@ -413,6 +416,11 @@ def main():
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, collate_fn=collator)
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=collator)
 
+    if args.relora is False:
+        total_steps = args.num_epochs * len(train_dataloader)
+        lr_scheduler =  OneCycleLR(optimizer, max_lr=args.learning_rate, total_steps=total_steps, pct_start=0.3)  # pct_start defines the fraction of cycle for warm-up
+        logger.info("One Cycle LR used")
+
     # for now we do not need a custom collator as we are using model.generate with left padding and an entire batch
     """
     def custom_collator(batch_samples):
@@ -446,10 +454,8 @@ def main():
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
             loss.backward()
-            if args.relora:
-                lr_scheduler.step()
-            else:
-                optimizer.step()
+            optimizer.step()
+            lr_scheduler.step()
 
             # relora merge weights, reinit weights and reset optimizer
             if global_step % args.relora_frequency == 0:
@@ -468,6 +474,7 @@ def main():
                 logger.info(f"Computing the evaluation")
                 eval(model, val_dataloader, global_step, args, tokenizer)
             #TODO remove this later on for debugging purposes only
+            break
 
     logger.info("Finished fine tuning")
 
