@@ -123,7 +123,7 @@ def parse_args():
 
     parser.add_argument("--max_length",
                         type=int,
-                        default=128,
+                        default=512,
                         help="Maximum length of the input sequence")
 
     parser.add_argument("--relora",
@@ -169,7 +169,7 @@ def parse_args():
 def eval(model, val_dataloader, global_step, args, tokenizer):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     #device = "cpu"
-    model = model.to(device)
+    model = model.to(device=device, dtype=torch.bfloat16)
     metric_name = metric_mapping[args.task_name]
     with torch.no_grad():
         model.eval()
@@ -218,13 +218,13 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
         all_predictions = []
         all_labels = []
         #logger.info(f"Generated words")
-        for batch in test_dataloader:
+        for batch_idx, batch in enumerate(test_dataloader):
             # do not need to add an extra dimension now that we have batch generate
 
             input_ids = batch["input_ids_generate"].to(device)
             attention_mask = batch["attention_mask_generate"].to(device)
             labels = batch["targets_generate"].to(device)
-            max_token_length = 20
+            max_token_length = 7
             pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
             output = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_token_length, pad_token_id=pad_token_id, num_beams=3, early_stopping=True)
             # remove input ids from generation - need to be dynamic
@@ -245,8 +245,12 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
                     label_index = tasks_to_labels[task_name].index(decoded_labels)
 
                 all_predictions.append(label_index)
-                #logger.info(f"Actual Input {tokenizer.decode(input_ids[idx])}")
-                #logger.info(f"Predicted text: {output_text} Actual label: {decoded_labels}")
+                # log first batch
+                if batch_idx == 0:
+                    logger.info(f"Actual Input {tokenizer.decode(input_ids[idx])}")
+                    logger.info(f"Predicted text: {output_text} Actual label: {decoded_labels}")
+                    logger.info(f"All predictions {all_predictions}")
+                    logger.info(f"all labels {all_labels}")
                 all_labels.append(tasks_to_labels[task_name].index(decoded_labels))
 
         metric = metric_mapping[task_name]
@@ -330,7 +334,7 @@ def main():
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     #model = model.to(device=device, dtype=torch.bfloat16)
-    model = model.to(device=device)
+    model = model.to(device=device, dtype=torch.bfloat16)
 
     #tokenizer = T5Tokenizer.from_pretrained(args.model)
     logger.info(f"Loaded model: {args.model}")
@@ -509,7 +513,7 @@ def main():
     if args.model_arch == "decoder":
         # load best model
         model = ARCH_TO_CLASS[args.model_arch].from_pretrained(f"best_model_{args.task_name}")
-        model = model.to(device)
+        model = model.to(device=device, dtype=torch.bfloat16)
         score = evaluate_glue_decoder(model, test_dataloader, args.task_name, tokenizer, args)
         logger.info(f"The best metric on the validation dataset is {score}")
 
