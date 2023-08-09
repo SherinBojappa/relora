@@ -295,7 +295,9 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
             labels = batch["targets_generate"].to(device)
             max_token_length = 2
             pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-            output = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_token_length, pad_token_id=pad_token_id, num_beams=3, early_stopping=True)
+            #output = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_token_length, pad_token_id=pad_token_id, num_beams=3, early_stopping=True)
+            # task is trivial now predict A, B, or C so no need of beams
+            output = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_token_length, pad_token_id=pad_token_id)
             # remove input ids from generation - need to be dynamic
             # input_ids are already padding to max length so remove them from the generated outputs
             generated_ids = output[:, args.max_length:]
