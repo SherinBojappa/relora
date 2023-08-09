@@ -238,15 +238,11 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
             # you will need to iterate over each generated id to get the decoding
             for idx, generation in enumerate(generated_ids):
                 output_text = tokenizer.decode(generation)
-                # ideally output_text should be the same as the first word since we have trained the model with it
-                # so ignore first_word search, if it is not we may need to add back the first word search
-                # extract the first word as you get something like positive :positive :
-                generated_strings = output_text.strip().lower().split(" ")
 
                 decoded_labels = tokenizer.decode(labels[idx], skip_special_tokens=True)
                 label_index = -1
                 # you will always have one decoded_label even for strings like not_entailment
-                if decoded_labels in generated_strings:
+                if decoded_labels in output_text:
                     label_index = tasks_to_labels[task_name].index(decoded_labels)
 
                 all_predictions.append(label_index)
