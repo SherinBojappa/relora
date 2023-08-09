@@ -365,7 +365,7 @@ PATTERNS = {
         ("Which person is {pronoun} referring to in the following sentence?\n{sentence}\n\n{options_}", "{answer}"),
         ("{sentence}\nWho is \"{pronoun}\"?\n{options_}", "{answer}"),
     ],
-    "glue_mrpc": [
+    "mrpc": [
         ("Here are two sentences:\n{sentence1}\n{sentence2}\nDo they have the same meaning?\n{options_}", "{answer}"),
         ("Here are two sentences:\n\n{sentence1}\n\n{sentence2}\nAre the two sentences saying the same thing?\n{options_}", "{answer}"),
         ("{sentence1}\n\n{sentence2}\n\nDo the above sentences mean the same thing?\n{options_}", "{answer}"),
@@ -377,7 +377,7 @@ PATTERNS = {
         ("Do these two sentences mean the same thing?\n{sentence1}\n{sentence2}\n\n{options_}", "{answer}"),
         ("Do these sentences have the same meaning?\n{sentence1}\n{sentence2}\n\n{options_}", "{answer}"),
     ],
-    "glue_qqp": [
+    "qqp": [
         ("{question1}\n{question2}\nWould you say that these questions are the same?\n{options_}", "{answer}"),
         ("{question1}\n{question2}\nDo those questions have the same meaning?\n{options_}", "{answer}"),
         ("{question1}\n{question2}\n\nAre these two questions inquiring about the same information?\n{options_}", "{answer}"),
