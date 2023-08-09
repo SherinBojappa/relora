@@ -167,6 +167,21 @@ def parse_args():
                        default=4,
                        help="Perform optimization every accumulation_steps mini batches")
 
+    parser.add_argument(
+        "--lr_scheduler_type",
+        type=SchedulerType,
+        default="linear",
+        help="The scheduler type to use.",
+        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
+    )
+
+    parser.add_argument(
+        "--num_warmup_steps",
+        type=int,
+        default=500,
+        help="Number of steps for the warmup in the lr scheduler."
+    )
+
 
     args = parser.parse_args()
     return args
@@ -442,8 +457,13 @@ def main():
 
     if args.relora is False:
         total_steps = args.num_epochs * len(train_dataloader)
-        lr_scheduler =  OneCycleLR(optimizer, max_lr=args.learning_rate, total_steps=total_steps, pct_start=0.3)  # pct_start defines the fraction of cycle for warm-up
-        logger.info("One Cycle LR used")
+        #lr_scheduler =  OneCycleLR(optimizer, max_lr=args.learning_rate, total_steps=total_steps, pct_start=0.3)  # pct_start defines the fraction of cycle for warm-up
+        lr_scheduler = get_scheduler(name=args.lr_scheduler_type,
+                                     optimizer=optimizer,
+                                     num_warmup_steps=args.num_warmup_steps,
+                                     #num_training_steps=args.max_train_steps, # early stopping affects this
+                                    )
+        logger.info(f"Scheduler used is {args.lr_scheduler_type}")
 
     # for now we do not need a custom collator as we are using model.generate with left padding and an entire batch
     """
@@ -490,22 +510,23 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-                # Reset accumulated loss
-                #logger.info(f"optimization on {batch_idx}")
-                accumulated_loss = 0.0
 
-            # relora merge weights, reinit weights and reset optimizer
-            #if global_step % args.relora_frequency == 0:
-                #merge_and_reinit_functional(model)
-                #reset_optimizer(optimizer, reset_params=params_to_update, pruning_amount=0.9)
+                # relora merge weights, reinit weights and reset optimizer
+                #if global_step % args.relora_frequency == 0:
+                    #merge_and_reinit_functional(model)
+                    #reset_optimizer(optimizer, reset_params=params_to_update, pruning_amount=0.9)
 
                 wandb.log(
-                    {"train_loss": loss.item(),
+                    {"train_loss": accumulated_loss / args.accumulation_steps,
                     "step": global_step,
                     "epoch": epoch,
                     "learning_rate": optimizer.param_groups[0]["lr"]},
                     step=global_step
                 )
+
+                # Reset accumulated loss
+                #logger.info(f"optimization on {batch_idx}")
+                accumulated_loss = 0.0
 
         logger.info(f"Computing the evaluation")
         current_score = eval(model, val_dataloader, global_step, args, tokenizer)
