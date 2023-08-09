@@ -315,9 +315,16 @@ def evaluate_glue_decoder(model, test_dataloader, task_name, tokenizer, args):
 
 
                 decoded_labels = tokenizer.decode(labels[idx], skip_special_tokens=True)
+                if 'A' in decoded_labels:
+                    true_label = 0
+                elif 'B' in decoded_labels:
+                    true_label = 1
+                elif 'C' in decoded_labels:
+                    true_label = 2
+
 
                 all_predictions.append(label_index)
-                all_labels.append(tasks_to_labels[task_name].index(decoded_labels))
+                all_labels.append(true_label)
                 # log first batch
                 if batch_idx == 0:
                     logger.info(f"Actual Input {tokenizer.decode(input_ids[idx])}")
@@ -523,7 +530,7 @@ def main():
     global_step = 0
     best_score = 0
     patience_counter = 0
-    max_patience = 2
+    max_patience = 5
     for epoch in tqdm(range(args.num_epochs)):
         accumulated_loss = 0.0
         for batch_idx, batch in enumerate(train_dataloader):
