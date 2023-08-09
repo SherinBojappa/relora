@@ -13,7 +13,7 @@ from transformers import AutoTokenizer, DataCollatorForLanguageModeling
 from datasets import load_dataset, load_metric, DatasetDict
 from transformers.data.data_collator import DataCollatorWithPadding
 from transformers import AutoModelForMaskedLM, AutoModelForCausalLM, T5ForConditionalGeneration
-from transformers import SchedulerType, get_scheduler
+from transformers import SchedulerType, get_scheduler, get_constant_schedule_with_warmup
 from tqdm import tqdm
 import evaluate
 import torch
@@ -389,40 +389,48 @@ def main():
                 'labels': targets['input_ids']}
 
     def preprocess_function_decoder(examples):
-        # add a separator between inputs and targets for the model to learn when to predict the targets
+        # Concatenate the inputs and targets
         inputs = examples['inputs'] + ":" + examples['targets']
-        inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding="max_length", return_tensors='pt')
-        # ignore the mask for now so now you have all the next word predictions in your loss, if including the mask
-        # you need to account for labels that are greater than 1 token long
+        tokenized_inputs = tokenizer(inputs, truncation=True, max_length=args.max_length, padding="max_length", return_tensors='pt')
 
-        # Create a mask where the elements corresponding to example['inputs'] are True
-        #mask = torch.full((len(inputs['input_ids'][0]),), fill_value=False, dtype=torch.bool)
 
-        # there is a space in the end added to tokenizer(examples['inputs'])
-        # it isnt present in tokenizer(examples['inputs']+examples['targets'])
-        # hence subtract -1
-        #print(len(tokenizer(examples['inputs'])['input_ids'])) # 14
-        #len_inputs = len(tokenizer(examples['inputs']))
-        #mask[:len_inputs] = True
+        # Calculate the length of the inputs + ":" (including the space at the end)
+        tokenized_inputs_with_colon = tokenizer(examples['inputs'] + ':')
+        tokenized_inputs_with_target = tokenizer(examples['inputs'] + ':' + examples['targets'], padding=False)
+        len_inputs = len(tokenized_inputs_with_target['input_ids'])
+        #logger.info(tokenized_inputs_with_colon)
+        len_inputs_with_colon = len(tokenized_inputs_with_colon['input_ids'])
 
-        targets = inputs['input_ids'].clone()
+        # Clone the input_ids to create targets
+        targets = tokenized_inputs['input_ids'].clone()
 
-        # pad tokens are ignored in the loss
+        # Set the tokens corresponding to the inputs and the colon to -100 in the targets
+        #targets[:, :len_inputs_with_colon] = -100
+        start_index = args.max_length - len_inputs - 1
+        end_index = len_inputs_with_colon
+        #logger.info(f"Inputs with targets {start_index}")
+        #logger.info(f"Inputs without targets {end_index}")
+        #logger.info(f"Start Index is {start_index}")
+        #logger.info(f"End Index is {end_index}")
+        targets[:, start_index:start_index+end_index] = -100  # left padding, change to above if right
+        #logger.info(f"targets {targets}")
+
+        # Pad tokens are also ignored in the loss
         targets[targets == tokenizer.pad_token_id] = -100
 
-        # create another set of inputs and targets to be used by the generate function
+        # Create another set of inputs and targets to be used by the generate function
         inputs_generate = examples['inputs'] + ":"
         inputs_generate = tokenizer(inputs_generate, add_special_tokens=False, truncation=True, max_length=args.max_length, padding="max_length", return_tensors='pt')
         targets_generate =  tokenizer(examples['targets'], truncation=True, max_length=args.max_length, padding="max_length", return_tensors="pt")
-        # inputs are also ignored in the loss
-        #targets[mask.unsqueeze(0)] = -100
 
-        return {'input_ids': inputs['input_ids'].squeeze(0),
-                'attention_mask': inputs['attention_mask'].squeeze(0),
-                'labels': targets.squeeze(0),
-                'input_ids_generate': inputs_generate['input_ids'].squeeze(0),
-                'attention_mask_generate': inputs_generate['attention_mask'].squeeze(0),
-                'targets_generate': targets_generate["input_ids"].squeeze(0)}
+        return {
+            'input_ids': tokenized_inputs['input_ids'].squeeze(0),
+            'attention_mask': tokenized_inputs['attention_mask'].squeeze(0),
+            'labels': targets.squeeze(0),
+            'input_ids_generate': inputs_generate['input_ids'].squeeze(0),
+            'attention_mask_generate': inputs_generate['attention_mask'].squeeze(0),
+            'targets_generate': targets_generate["input_ids"].squeeze(0)
+        }
 
     # for validation do not tokenize the label
     def preprocess_function_decoder_val(examples):
@@ -459,12 +467,10 @@ def main():
     if args.relora is False:
         total_steps = args.num_epochs * len(train_dataloader)
         #lr_scheduler =  OneCycleLR(optimizer, max_lr=args.learning_rate, total_steps=total_steps, pct_start=0.3)  # pct_start defines the fraction of cycle for warm-up
-        lr_scheduler = get_scheduler(name=args.lr_scheduler_type,
-                                     optimizer=optimizer,
-                                     num_warmup_steps=args.num_warmup_steps,
-                                     #num_training_steps=args.max_train_steps, # early stopping affects this
-                                    )
-        logger.info(f"Scheduler used is {args.lr_scheduler_type}")
+        #lr_scheduler = get_constant_schedule_with_warmup(optimizer=optimizer,
+        #                                                 num_warmup_steps=args.num_warmup_steps*args.accumulation_steps,
+        #                                                )
+        logger.info(f"Scheduler used is constant scheduler with warmup")
 
     # for now we do not need a custom collator as we are using model.generate with left padding and an entire batch
     """
@@ -497,9 +503,15 @@ def main():
             global_step += 1
             model.train()
             optimizer.zero_grad()
+            """
+            if batch_idx == 0:
+                logger.info(f"Input ids {tokenizer.decode(batch['input_ids'][0])}")
+                logger.info(f"Labels {tokenizer.decode(batch['labels'][0])}")
+            """
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
+
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
             # Accumulate loss
@@ -509,7 +521,7 @@ def main():
 
             if (batch_idx + 1) % args.accumulation_steps == 0:
                 optimizer.step()
-                lr_scheduler.step()
+                #lr_scheduler.step()
                 optimizer.zero_grad()
 
                 # relora merge weights, reinit weights and reset optimizer
@@ -520,7 +532,6 @@ def main():
                 wandb.log(
                     {"train_loss": accumulated_loss / args.accumulation_steps,
                     "step": global_step,
-                    "epoch": epoch,
                     "learning_rate": optimizer.param_groups[0]["lr"]},
                     step=global_step
                 )
@@ -537,7 +548,7 @@ def main():
             model.save_pretrained(f"best_model_{args.task_name}")
         else:
             patience_counter += 1
-            if patience_counter >= max_patience:
+            if patience_counter >= max_patience and current_score != 0:
                 print(f"No improvement after", {max_patience}, "epochs. Stopping training.")
                 break
 
