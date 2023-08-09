@@ -13,6 +13,7 @@ from transformers import AutoTokenizer, DataCollatorForLanguageModeling
 from datasets import load_dataset, load_metric, DatasetDict
 from transformers.data.data_collator import DataCollatorWithPadding
 from transformers import AutoModelForMaskedLM, AutoModelForCausalLM, T5ForConditionalGeneration
+from transformers import SchedulerType, get_scheduler
 from tqdm import tqdm
 import evaluate
 import torch
