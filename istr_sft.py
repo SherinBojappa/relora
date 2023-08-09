@@ -32,13 +32,13 @@ ARCH_TO_CLASS = {
 }
 
 task_to_keys = {
-    "cola": ("sentence", None),
+    "cola": ("sentence"),
     "mnli": ("premise", "hypothesis"),
     "mrpc": ("sentence1", "sentence2"),
     "qnli": ("question", "sentence"),
     "qqp": ("question1", "question2"),
     "rte": ("sentence1", "sentence2"),
-    "sst2": ("sentence", None),
+    "sst2": ("sentence"),
     "sts-b": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
 }
@@ -532,7 +532,7 @@ def main():
     global_step = 0
     best_score = 0
     patience_counter = 0
-    max_patience = 5
+    max_patience = 50
     for epoch in tqdm(range(args.num_epochs)):
         accumulated_loss = 0.0
         for batch_idx, batch in enumerate(train_dataloader):
