@@ -328,6 +328,16 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path, use_fast=not args.use_slow_tokenizer, trust_remote_code=args.trust_remote_code
     )
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        else:
+            raise ValueError("EOS token does not exist")
+
+        print(f"Pad token is : {tokenizer.pad_token}")
+        print(f"Pad token id is : {tokenizer.pad_token_id}")
+
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name_or_path,
         from_tf=bool(".ckpt" in args.model_name_or_path),
@@ -335,6 +345,10 @@ def main():
         ignore_mismatched_sizes=args.ignore_mismatched_sizes,
         trust_remote_code=args.trust_remote_code,
     )
+    # set the pad token
+    model.config.pad_token_id = tokenizer.pad_token_id
+
+    print(f"The model pad token is {model.config.pad_token_id}")
 
     # Preprocessing the datasets
     if args.task_name is not None:
