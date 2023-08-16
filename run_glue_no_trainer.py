@@ -622,7 +622,7 @@ def main():
                 optimizer.zero_grad()
 
                 # relora merge weights, reinit weights and reset optimizer
-                if args.relora and completed_steps % args.relora_frequency == 0:
+                if args.relora and completed_steps % args.reset_freq == 0:
                     merge_and_reinit_functional(model)
                     reset_optimizer(optimizer, reset_params=params_to_update, pruning_amount=0.9)
 
