@@ -493,7 +493,6 @@ def main():
             "weight_decay": 0.0,
         },
     ]
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -510,12 +509,13 @@ def main():
         params = sum(p.numel() for p in params_to_update)
         logger.info(f"Number of trainable parameters: {params}")
         # lora -> reset freq large
-        optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=args.learning_rate)
+        optimizer = torch.optim.Adam((p for p in model.parameters() if p.requires_grad), lr=args.learning_rate)
         lr_scheduler = get_ragged_cosine_schedule(optimizer=optimizer, num_training_steps=args.max_train_steps, \
                                                   first_warmup_steps=args.num_warmup_steps, \
                                                   restart_warmup_steps = args.restart_warmup_steps, \
                                                   reset_freq=args.reset_freq)
     else:
+        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
         lr_scheduler = get_scheduler(
             name=args.lr_scheduler_type,
             optimizer=optimizer,
