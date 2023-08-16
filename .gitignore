@@ -1,3 +1,6 @@
 wandb/
 __pycache__/
 scratch.ipynb/
+*.log
+best_model*/
+model*/
