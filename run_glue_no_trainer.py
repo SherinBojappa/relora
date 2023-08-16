@@ -215,22 +215,16 @@ def parse_args():
         help="rank used in ReLoRA")
 
     parser.add_argument(
-        "--relora_frequency",
+        "--reset_freq",
         type=int,
-        default=20_000,
+        default=2_000,
         help="Frequency of ReLoRA")
 
     parser.add_argument(
         "--num_training_steps",
         type=int,
-        default=200,
+        default=2000,
         help="Number of training steps to perform")
-
-    parser.add_argument(
-        "--first_warmup_steps",
-        type=int,
-        default=50,
-        help="First warmup steps")
 
     parser.add_argument(
         "--restart_warmup_steps",
@@ -508,13 +502,6 @@ def main():
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
 
-    lr_scheduler = get_scheduler(
-        name=args.lr_scheduler_type,
-        optimizer=optimizer,
-        num_warmup_steps=args.num_warmup_steps,
-        num_training_steps=args.max_train_steps,
-    )
-
     # relora the model
     if args.relora:
         model = wrap_with_ReLoRa(model=model, r=args.r)
@@ -524,11 +511,17 @@ def main():
         logger.info(f"Number of trainable parameters: {params}")
         # lora -> reset freq large
         optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=args.learning_rate)
-        lr_scheduler = get_ragged_cosine_schedule(optimizer=optimizer, num_training_steps=args.num_training_steps, \
-                                                  first_warmup_steps=args.first_warmup_steps, \
+        lr_scheduler = get_ragged_cosine_schedule(optimizer=optimizer, num_training_steps=args.max_train_steps, \
+                                                  first_warmup_steps=args.num_warmup_steps, \
                                                   restart_warmup_steps = args.restart_warmup_steps, \
-                                                  reset_freq=args.relora_frequency)
-
+                                                  reset_freq=args.reset_freq)
+    else:
+        lr_scheduler = get_scheduler(
+            name=args.lr_scheduler_type,
+            optimizer=optimizer,
+            num_warmup_steps=args.num_warmup_steps,
+            num_training_steps=args.max_train_steps,
+        )
     # Prepare everything with our `accelerator`.
     model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
@@ -627,6 +620,12 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+
+                # relora merge weights, reinit weights and reset optimizer
+                if args.relora and completed_steps % args.relora_frequency == 0:
+                    merge_and_reinit_functional(model)
+                    reset_optimizer(optimizer, reset_params=params_to_update, pruning_amount=0.9)
+
                 progress_bar.update(1)
                 completed_steps += 1
 
@@ -667,6 +666,7 @@ def main():
                 {
                     "accuracy" if args.task_name is not None else "glue": eval_metric,
                     "train_loss": total_loss.item() / len(train_dataloader),
+                    "lr": optimizer.param_groups[0]["lr"],
                     "epoch": epoch,
                     "step": completed_steps,
                 },
