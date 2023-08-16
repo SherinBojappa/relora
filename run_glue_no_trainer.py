@@ -506,6 +506,10 @@ def main():
         model = wrap_with_ReLoRa(model=model, r=args.r)
         logger.info(f"Relora with rank {args.r} is used")
         params_to_update = [param for param in model.parameters() if param.requires_grad]
+        # update this everytime you have a new model
+        model_type = model.config.model_type
+        optimizer_params_to_reset = [param for name, param in model.named_parameters() if "lora_" in name]
+
         params = sum(p.numel() for p in params_to_update)
         logger.info(f"Number of trainable parameters: {params}")
         # lora -> reset freq large
@@ -624,7 +628,7 @@ def main():
                 # relora merge weights, reinit weights and reset optimizer
                 if args.relora and completed_steps % args.reset_freq == 0:
                     merge_and_reinit_functional(model)
-                    reset_optimizer(optimizer, reset_params=params_to_update, pruning_amount=0.9)
+                    reset_optimizer(optimizer, reset_params=optimizer_params_to_reset, pruning_amount=0.9)
 
                 progress_bar.update(1)
                 completed_steps += 1

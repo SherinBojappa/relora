@@ -30,7 +30,7 @@ def wrap_with_ReLoRa(model, r=128, lora_alpha=32, lora_dropout=0.1, trainable_sc
         raise ValueError("r must be positive. If you want r == 0, use the original model.")
 
     new_model = model
-
+    wrapped_one = False
     for module_name, module in model.named_modules():
         if not isinstance(module, nn.Linear):
             continue
@@ -39,6 +39,7 @@ def wrap_with_ReLoRa(model, r=128, lora_alpha=32, lora_dropout=0.1, trainable_sc
             print("WARNING: Trying to wrap ReLoRA into ReLoRA. Are you sure this is what you want?")
             continue
 
+        wrapped_one = True
         new_module = ReLoRaLinear(
             module.in_features,
             module.out_features,
@@ -58,6 +59,8 @@ def wrap_with_ReLoRa(model, r=128, lora_alpha=32, lora_dropout=0.1, trainable_sc
         module_suffix = module_name.split(".")[-1]
         setattr(parent, module_suffix, new_module)
 
+    if not wrapped_one:
+        raise ValueError("No nn.Linear found in the model. Cannot wrap with ReLoRa.")
     return new_model
 
 
