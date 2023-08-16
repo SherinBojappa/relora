@@ -45,6 +45,8 @@ from transformers import (
 )
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
+from functional import wrap_with_ReLoRa, merge_and_reinit_functional
+from optim import get_ragged_cosine_schedule, reset_optimizer
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -198,6 +200,44 @@ def parse_args():
         action="store_true",
         help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
     )
+
+    parser.add_argument(
+        "--relora",
+        action="store_true",
+        default=False,
+        required=False,
+        help="Whether to use ReLoRA or not")
+
+    parser.add_argument(
+        "--r",
+        type=int,
+        default=128,
+        help="rank used in ReLoRA")
+
+    parser.add_argument(
+        "--relora_frequency",
+        type=int,
+        default=20_000,
+        help="Frequency of ReLoRA")
+
+    parser.add_argument(
+        "--num_training_steps",
+        type=int,
+        default=200,
+        help="Number of training steps to perform")
+
+    parser.add_argument(
+        "--first_warmup_steps",
+        type=int,
+        default=50,
+        help="First warmup steps")
+
+    parser.add_argument(
+        "--restart_warmup_steps",
+        type=int,
+        default=10,
+        help="Number of restart warmup steps to perform")
+
     args = parser.parse_args()
 
     # Sanity checks
@@ -348,7 +388,9 @@ def main():
     # set the pad token
     model.config.pad_token_id = tokenizer.pad_token_id
 
-    print(f"The model pad token is {model.config.pad_token_id}")
+    logger.info(f"The model pad token is {model.config.pad_token_id}")
+    num_params = sum(param.numel() for param in model.parameters() if param.requires_grad)
+    logger.info(f"The total number of params before relora is {num_params} ")
 
     # Preprocessing the datasets
     if args.task_name is not None:
@@ -472,6 +514,20 @@ def main():
         num_warmup_steps=args.num_warmup_steps,
         num_training_steps=args.max_train_steps,
     )
+
+    # relora the model
+    if args.relora:
+        model = wrap_with_ReLoRa(model=model, r=args.r)
+        logger.info(f"Relora with rank {args.r} is used")
+        params_to_update = [param for param in model.parameters() if param.requires_grad]
+        params = sum(p.numel() for p in params_to_update)
+        logger.info(f"Number of trainable parameters: {params}")
+        # lora -> reset freq large
+        optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=args.learning_rate)
+        lr_scheduler = get_ragged_cosine_schedule(optimizer=optimizer, num_training_steps=args.num_training_steps, \
+                                                  first_warmup_steps=args.first_warmup_steps, \
+                                                  restart_warmup_steps = args.restart_warmup_steps, \
+                                                  reset_freq=args.relora_frequency)
 
     # Prepare everything with our `accelerator`.
     model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
