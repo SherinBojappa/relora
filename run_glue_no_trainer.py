@@ -369,8 +369,8 @@ def main():
         else:
             raise ValueError("EOS token does not exist")
 
-        print(f"Pad token is : {tokenizer.pad_token}")
-        print(f"Pad token id is : {tokenizer.pad_token_id}")
+        logger.info(f"Pad token is : {tokenizer.pad_token}")
+        logger.info(f"Pad token id is : {tokenizer.pad_token_id}")
 
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name_or_path,
