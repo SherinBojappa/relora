@@ -149,7 +149,7 @@ def parse_args():
         choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
     )
     parser.add_argument(
-        "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
+        "--num_warmup_steps", type=int, default=100, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
@@ -229,7 +229,7 @@ def parse_args():
     parser.add_argument(
         "--restart_warmup_steps",
         type=int,
-        default=10,
+        default=100,
         help="Number of restart warmup steps to perform")
 
     args = parser.parse_args()
@@ -610,6 +610,7 @@ def main():
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
+
         for step, batch in enumerate(active_dataloader):
             outputs = model(**batch)
             loss = outputs.loss
@@ -630,6 +631,17 @@ def main():
 
                 progress_bar.update(1)
                 completed_steps += 1
+                if args.with_tracking:
+                  accelerator.log(
+                    {
+                        #"accuracy" if args.task_name is not None else "glue": eval_metric,
+                        "train_loss": total_loss.item() / len(train_dataloader),
+                        "lr": optimizer.param_groups[0]["lr"],
+                        "epoch": epoch,
+                        "step": completed_steps,
+                    },
+                    step=completed_steps,
+                )
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps % checkpointing_steps == 0:
@@ -667,8 +679,8 @@ def main():
             accelerator.log(
                 {
                     "accuracy" if args.task_name is not None else "glue": eval_metric,
-                    "train_loss": total_loss.item() / len(train_dataloader),
-                    "lr": optimizer.param_groups[0]["lr"],
+                    #"train_loss": total_loss.item() / len(train_dataloader),
+                    #"lr": optimizer.param_groups[0]["lr"],
                     "epoch": epoch,
                     "step": completed_steps,
                 },
