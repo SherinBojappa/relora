@@ -68,6 +68,18 @@ task_to_keys = {
     "wnli": ("sentence1", "sentence2"),
 }
 
+# Define a dictionary to map GLUE tasks to their metrics
+metric_mapping = {
+    'cola': 'matthews_correlation',
+    'sst2': 'accuracy',
+    'mrpc': 'accuracy',
+    'qqp': 'accuracy',
+    'sts-b': 'spearmanr',
+    'mnli': 'accuracy',
+    'qnli': 'accuracy',
+    'rte': 'accuracy',
+    'wnli': 'accuracy'
+}
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Finetune a transformers model on a text classification task")
@@ -87,7 +99,7 @@ def parse_args():
     parser.add_argument(
         "--max_length",
         type=int,
-        default=128,
+        default=512,
         help=(
             "The maximum total input sequence length after tokenization. Sequences longer than this will be truncated,"
             " sequences shorter will be padded if `--pad_to_max_length` is passed."
@@ -112,22 +124,22 @@ def parse_args():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=8,
+        default=64,
         help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument(
         "--per_device_eval_batch_size",
         type=int,
-        default=8,
+        default=64,
         help="Batch size (per device) for the evaluation dataloader.",
     )
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=5e-5,
+        default=1e-5,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
-    parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
+    parser.add_argument("--weight_decay", type=float, default=0.2, help="Weight decay to use.")
     parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
     parser.add_argument(
         "--max_train_steps",
@@ -219,12 +231,6 @@ def parse_args():
         type=int,
         default=2_000,
         help="Frequency of ReLoRA")
-
-    parser.add_argument(
-        "--num_training_steps",
-        type=int,
-        default=2000,
-        help="Number of training steps to perform")
 
     parser.add_argument(
         "--restart_warmup_steps",
@@ -601,6 +607,7 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
+    best_metric = 0
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
         if args.with_tracking:
@@ -635,7 +642,7 @@ def main():
                   accelerator.log(
                     {
                         #"accuracy" if args.task_name is not None else "glue": eval_metric,
-                        "train_loss": total_loss.item() / len(train_dataloader),
+                        "train_loss": loss.item(),
                         "lr": optimizer.param_groups[0]["lr"],
                         "epoch": epoch,
                         "step": completed_steps,
@@ -698,6 +705,21 @@ def main():
                 repo.push_to_hub(
                     commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
                 )
+
+        # save only the model pertaining to the best metric
+        metric_name = metric_mapping[args.task_name]
+        if eval_metric[metric_name] >= best_metric:
+            best_metric = eval_metric[metric_name]
+            if args.report_to == "wandb":
+                wandb_tracker = accelerator.get_tracker("wandb")
+                wandb_run_name = wandb_tracker.run.name
+                output_dir = f"epoch_{epoch}_wandb_{wandb_run_name}"
+            else:
+                output_dir = f"epoch_{epoch}"
+            if args.output_dir is not None:
+                output_dir = os.path.join(args.output_dir, output_dir)
+            accelerator.save_state(output_dir)
+
 
         if args.checkpointing_steps == "epoch":
             output_dir = f"epoch_{epoch}"
