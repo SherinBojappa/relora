@@ -267,7 +267,7 @@ def main():
     # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
     # in the environment
     accelerator = (
-        Accelerator(log_with=args.report_to, project_dir=args.output_dir) if args.with_tracking else Accelerator()
+        Accelerator(log_with=args.report_to, project_dir=args.output_dir, mixed_precision='bf16') if args.with_tracking else Accelerator()
     )
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -385,6 +385,7 @@ def main():
         ignore_mismatched_sizes=args.ignore_mismatched_sizes,
         trust_remote_code=args.trust_remote_code,
     )
+
     # set the pad token
     model.config.pad_token_id = tokenizer.pad_token_id
 
@@ -619,6 +620,9 @@ def main():
             active_dataloader = train_dataloader
 
         for step, batch in enumerate(active_dataloader):
+            # skip the last batch
+            if step == len(train_dataloader) - 1:
+                continue
             outputs = model(**batch)
             loss = outputs.loss
             # We keep track of the loss at each epoch
@@ -626,6 +630,7 @@ def main():
                 total_loss += loss.detach().float()
             loss = loss / args.gradient_accumulation_steps
             accelerator.backward(loss)
+
             if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                 optimizer.step()
                 lr_scheduler.step()
@@ -642,13 +647,15 @@ def main():
                   accelerator.log(
                     {
                         #"accuracy" if args.task_name is not None else "glue": eval_metric,
-                        "train_loss": loss.item(),
+                        "train_loss": total_loss.item()/args.gradient_accumulation_steps,
                         "lr": optimizer.param_groups[0]["lr"],
                         "epoch": epoch,
                         "step": completed_steps,
                     },
                     step=completed_steps,
                 )
+
+                total_loss = 0
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps % checkpointing_steps == 0:
