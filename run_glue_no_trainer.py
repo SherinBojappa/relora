@@ -454,17 +454,29 @@ def main():
             else:
                 # In all cases, rename the column to labels because the model will expect that.
                 result["labels"] = examples["label"]
+                # result['lengths'] = len(result['input_ids'])
         return result
+
+    # def filter_by_length(example):
+    #     return example['lengths'] < 60
 
     with accelerator.main_process_first():
         processed_datasets = raw_datasets.map(
             preprocess_function,
+            # batched=False,
             batched=True,
             remove_columns=raw_datasets["train"].column_names,
             desc="Running tokenizer on dataset",
         )
 
+        # assert args.task_name == 'sst2' # plot hist and then ignore sentences greater than threshold
+        # # 60 is specific to sst2
+        # # do this filtering to ignore the large inputs which are minimal
+        # # this in turn will allow you to increase the bs and utilize gpu better
+        # filtered_train_dataset = processed_datasets['train'].filter(filter_by_length)
+
     train_dataset = processed_datasets["train"]
+    # train_dataset = filtered_train_dataset.remove_columns('lengths')
     eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
 
     # Log a few random samples from the training set:
@@ -481,7 +493,7 @@ def main():
         # the samples passed). When using mixed precision, we add `pad_to_multiple_of=8` to pad all tensors to multiple
         # of 8s, which will enable the use of Tensor Cores on NVIDIA hardware with compute capability >= 7.5 (Volta).
         data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=(8 if accelerator.use_fp16 else None))
-
+        # data_collator = DataCollatorWithPadding(tokenizer, padding='max_length')
     train_dataloader = DataLoader(
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
@@ -618,11 +630,12 @@ def main():
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
-
+        # num_lost = 0
         for step, batch in enumerate(active_dataloader):
-            # skip the last batch
-            if step == len(train_dataloader) - 1:
-                continue
+            # not good as most batches are affected
+            # if len(batch['input_ids'][0]) > 60:
+            #     num_lost += 1
+            #     continue
             outputs = model(**batch)
             loss = outputs.loss
             # We keep track of the loss at each epoch
@@ -631,7 +644,8 @@ def main():
             loss = loss / args.gradient_accumulation_steps
             accelerator.backward(loss)
 
-            if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+            if (step + 1) % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+            #if (step + 1) % args.gradient_accumulation_steps == 0:
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
