@@ -238,6 +238,12 @@ def parse_args():
         default=100,
         help="Number of restart warmup steps to perform")
 
+    parser.add_argument(
+        "--pruning_percentage",
+        type=float,
+        default=0.9,
+        help="Pruning percentage")
+
     args = parser.parse_args()
 
     # Sanity checks
@@ -653,7 +659,7 @@ def main():
                 # relora merge weights, reinit weights and reset optimizer
                 if args.relora and completed_steps % args.reset_freq == 0:
                     merge_and_reinit_functional(model)
-                    reset_optimizer(optimizer, reset_params=optimizer_params_to_reset, pruning_amount=0.9)
+                    reset_optimizer(optimizer, reset_params=optimizer_params_to_reset, pruning_amount=args.pruning_percentage)
 
                 progress_bar.update(1)
                 completed_steps += 1
@@ -676,7 +682,8 @@ def main():
                     output_dir = f"step_{completed_steps }"
                     if args.output_dir is not None:
                         output_dir = os.path.join(args.output_dir, output_dir)
-                    accelerator.save_state(output_dir)
+                    if accelerator.is_main_process:
+                        accelerator.save_state(output_dir)
 
             if completed_steps >= args.max_train_steps:
                 break
@@ -696,8 +703,8 @@ def main():
                 else:
                     samples_seen += references.shape[0]
             metric.add_batch(
-                predictions=predictions,
-                references=references,
+                predictions=accelerator.gather(predictions),
+                references=accelerator.gather(references),
             )
 
         eval_metric = metric.compute()
@@ -739,14 +746,17 @@ def main():
                 output_dir = f"epoch_{epoch}"
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
-            accelerator.save_state(output_dir)
+            if accelerator.is_main_process:
+                accelerator.save_state(output_dir)
 
 
         if args.checkpointing_steps == "epoch":
             output_dir = f"epoch_{epoch}"
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
-            accelerator.save_state(output_dir)
+
+            if accelerator.is_main_process:
+                accelerator.save_state(output_dir)
 
     if args.with_tracking:
         accelerator.end_training()
