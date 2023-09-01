@@ -15,6 +15,9 @@ Set up distributed and mixed precision training using accelerate using:
 accelerate config
 ```
 
+## Notes on total batch size,  per device batch size, and gradient accumulation
+Currently the total batch size is set to 192 and per device batch size to 12 based  on max batch size supported on NVIDIA GeForce RTX 3090. The current total batch size and per device batch size are used to compute number of gradient accumulation steps - the above parameters support 2 and 8 gpus.
+
 ## To run ReLoRA on sst2:
 ```bash
 python -u -m accelerate.commands.launch run_glue_no_trainer.py \
