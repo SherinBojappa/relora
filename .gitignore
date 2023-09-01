@@ -4,3 +4,4 @@ scratch.ipynb/
 *.log
 best_model*/
 model*/
+torchelastic_*/
