@@ -124,13 +124,13 @@ def parse_args():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=64,
+        default=12,
         help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument(
         "--per_device_eval_batch_size",
         type=int,
-        default=64,
+        default=12,
         help="Batch size (per device) for the evaluation dataloader.",
     )
     parser.add_argument(
@@ -148,9 +148,9 @@ def parse_args():
         help="Total number of training steps to perform. If provided, overrides num_train_epochs.",
     )
     parser.add_argument(
-        "--gradient_accumulation_steps",
+        "--total_batch_size",
         type=int,
-        default=1,
+        default=192,
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument(
@@ -520,9 +520,14 @@ def main():
         },
     ]
 
+    # total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    gradient_accumulation_steps = args.total_batch_size // (args.per_device_train_batch_size * accelerator.num_processes)
+    logger.info(f"gradient_accumulation_steps: {gradient_accumulation_steps}; total_batch_size: {args.total_batch_size}; \
+                  num_processes: {accelerator.num_processes}; per_device_train_batch_size: {args.per_device_train_batch_size}")
+
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
@@ -556,7 +561,7 @@ def main():
     )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
     if overrode_max_train_steps:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
@@ -581,15 +586,12 @@ def main():
     else:
         metric = evaluate.load("accuracy")
 
-    # Train!
-    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {args.total_batch_size}")
+    logger.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
@@ -619,7 +621,7 @@ def main():
             completed_steps = starting_epoch * num_update_steps_per_epoch
         else:
             # need to multiply `gradient_accumulation_steps` to reflect real steps
-            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
+            resume_step = int(training_difference.replace("step_", "")) * gradient_accumulation_steps
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
             completed_steps = resume_step // args.gradient_accumulation_step
@@ -648,10 +650,10 @@ def main():
             # We keep track of the loss at each epoch
             if args.with_tracking:
                 total_loss += loss.detach().float()
-            loss = loss / args.gradient_accumulation_steps
+            loss = loss / gradient_accumulation_steps
             accelerator.backward(loss)
 
-            if (step + 1) % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+            if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
             #if (step + 1) % args.gradient_accumulation_steps == 0:
                 optimizer.step()
                 lr_scheduler.step()
@@ -668,7 +670,7 @@ def main():
                   accelerator.log(
                     {
                         #"accuracy" if args.task_name is not None else "glue": eval_metric,
-                        "train_loss": total_loss.item()/args.gradient_accumulation_steps,
+                        "train_loss": total_loss.item()/gradient_accumulation_steps,
                         "lr": optimizer.param_groups[0]["lr"],
                         "epoch": epoch,
                         "step": completed_steps,
@@ -683,8 +685,8 @@ def main():
                     output_dir = f"step_{completed_steps }"
                     if args.output_dir is not None:
                         output_dir = os.path.join(args.output_dir, output_dir)
-                    if accelerator.is_main_process:
-                        accelerator.save_state(output_dir)
+                        if accelerator.is_main_process:
+                            accelerator.save_state(output_dir)
 
             if completed_steps >= args.max_train_steps:
                 break
@@ -739,16 +741,10 @@ def main():
         metric_name = metric_mapping[args.task_name]
         if eval_metric[metric_name] >= best_metric:
             best_metric = eval_metric[metric_name]
-            if args.report_to == "wandb":
-                wandb_tracker = accelerator.get_tracker("wandb")
-                wandb_run_name = wandb_tracker.run.name
-                output_dir = f"epoch_{epoch}_wandb_{wandb_run_name}"
-            else:
-                output_dir = f"epoch_{epoch}"
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
-            if accelerator.is_main_process:
-                accelerator.save_state(output_dir)
+                if accelerator.is_main_process:
+                    accelerator.save_state(output_dir)
 
 
         if args.checkpointing_steps == "epoch":
@@ -756,8 +752,8 @@ def main():
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
 
-            if accelerator.is_main_process:
-                accelerator.save_state(output_dir)
+                if accelerator.is_main_process:
+                    accelerator.save_state(output_dir)
 
     if args.with_tracking:
         accelerator.end_training()
