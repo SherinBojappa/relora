@@ -74,7 +74,7 @@ metric_mapping = {
     'sst2': 'accuracy',
     'mrpc': 'accuracy',
     'qqp': 'accuracy',
-    'sts-b': 'spearmanr',
+    'stsb': 'spearmanr',
     'mnli': 'accuracy',
     'qnli': 'accuracy',
     'rte': 'accuracy',
