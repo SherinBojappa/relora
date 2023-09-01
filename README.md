@@ -9,6 +9,12 @@ cd relora
 pip install -r requirements.txt
 ```
 
+## Accelerate
+Set up distributed and mixed precision training using accelerate using:
+```bash
+accelerate config
+```
+
 ## To run ReLoRA on sst2:
 ```bash
 python -u -m accelerate.commands.launch run_glue_no_trainer.py \

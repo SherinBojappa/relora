@@ -11,3 +11,4 @@ lion-pytorch
 scipy
 scikit-learn
 evaluate
+accelerate
