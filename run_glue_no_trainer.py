@@ -195,12 +195,13 @@ def parse_args():
     parser.add_argument(
         "--with_tracking",
         action="store_true",
+        default=True,
         help="Whether to enable experiment trackers for logging.",
     )
     parser.add_argument(
         "--report_to",
         type=str,
-        default="all",
+        default="wandb",
         help=(
             'The integration to report the results and logs to. Supported platforms are `"tensorboard"`,'
             ' `"wandb"`, `"comet_ml"` and `"clearml"`. Use `"all"` (default) to report to all integrations.'
@@ -572,7 +573,7 @@ def main():
         experiment_config = vars(args)
         # TensorBoard cannot log Enums, need the raw value
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-        accelerator.init_trackers("glue_no_trainer", experiment_config)
+        accelerator.init_trackers("relora_glue_fine_tuning", experiment_config)
 
     # Get the metric function
     if args.task_name is not None:
