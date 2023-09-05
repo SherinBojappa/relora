@@ -16,7 +16,7 @@ accelerate config
 ```
 
 ### Notes on total batch size
-Currently the total batch size is set to 192 and per device batch size to 12 based  on max batch size supported on NVIDIA GeForce RTX 3090. The current total batch size and per device batch size are used to compute number of gradient accumulation steps - the above parameters support 2 and 8 gpus.
+Currently the total batch size is set to 128 and per device batch size to 8 based  on batch size supported on NVIDIA GeForce RTX 3090. The current total batch size and per device batch size are used to compute number of gradient accumulation steps - the above parameters support 2 and 8 gpus.
 
 ## To run ReLoRA on sst2:
 ```bash
