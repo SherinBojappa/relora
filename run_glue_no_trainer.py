@@ -124,7 +124,8 @@ def parse_args():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=12,
+        # default=12,
+        default=8,
         help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument(
@@ -150,8 +151,14 @@ def parse_args():
     parser.add_argument(
         "--total_batch_size",
         type=int,
-        default=192,
+        default=128,
         help="Number of updates steps to accumulate before performing a backward/update pass.",
+    )
+    parser.add_argument(
+        "--eval_every",
+        type=int,
+        default=500,
+        help="Number of steps after which an evaluation is performed.",
     )
     parser.add_argument(
         "--lr_scheduler_type",
@@ -691,39 +698,41 @@ def main():
             if completed_steps >= args.max_train_steps:
                 break
 
-        model.eval()
-        samples_seen = 0
-        for step, batch in enumerate(eval_dataloader):
-            with torch.no_grad():
-                outputs = model(**batch)
-            predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
-            predictions, references = accelerator.gather((predictions, batch["labels"]))
-            # If we are in a multiprocess environment, the last batch has duplicates
-            if accelerator.num_processes > 1:
-                if step == len(eval_dataloader) - 1:
-                    predictions = predictions[: len(eval_dataloader.dataset) - samples_seen]
-                    references = references[: len(eval_dataloader.dataset) - samples_seen]
-                else:
-                    samples_seen += references.shape[0]
-            metric.add_batch(
-                predictions=accelerator.gather(predictions),
-                references=accelerator.gather(references),
-            )
+            # evaluate the model
+            if completed_steps % args.eval_every == 0:
+                model.eval()
+                samples_seen = 0
+                for step, batch in enumerate(eval_dataloader):
+                    with torch.no_grad():
+                        outputs = model(**batch)
+                    predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
+                    predictions, references = accelerator.gather((predictions, batch["labels"]))
+                    # If we are in a multiprocess environment, the last batch has duplicates
+                    if accelerator.num_processes > 1:
+                        if step == len(eval_dataloader) - 1:
+                            predictions = predictions[: len(eval_dataloader.dataset) - samples_seen]
+                            references = references[: len(eval_dataloader.dataset) - samples_seen]
+                        else:
+                            samples_seen += references.shape[0]
+                    metric.add_batch(
+                        predictions=accelerator.gather(predictions),
+                        references=accelerator.gather(references),
+                    )
 
-        eval_metric = metric.compute()
-        logger.info(f"epoch {epoch}: {eval_metric}")
+                eval_metric = metric.compute()
+                logger.info(f"epoch {epoch}: {eval_metric}")
 
-        if args.with_tracking:
-            accelerator.log(
-                {
-                    "accuracy" if args.task_name is not None else "glue": eval_metric,
-                    #"train_loss": total_loss.item() / len(train_dataloader),
-                    #"lr": optimizer.param_groups[0]["lr"],
-                    "epoch": epoch,
-                    "step": completed_steps,
-                },
-                step=completed_steps,
-            )
+                if args.with_tracking:
+                    accelerator.log(
+                        {
+                            "accuracy" if args.task_name is not None else "glue": eval_metric,
+                            #"train_loss": total_loss.item() / len(train_dataloader),
+                            #"lr": optimizer.param_groups[0]["lr"],
+                            "epoch": epoch,
+                            "step": completed_steps,
+                        },
+                        step=completed_steps,
+                    )
 
         if args.push_to_hub and epoch < args.num_train_epochs - 1:
             accelerator.wait_for_everyone()
@@ -737,23 +746,24 @@ def main():
                     commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
                 )
 
+        # we do not need to evaluate this because we are doing evaluation every eval_every steps
         # save only the model pertaining to the best metric
-        metric_name = metric_mapping[args.task_name]
-        if eval_metric[metric_name] >= best_metric:
-            best_metric = eval_metric[metric_name]
-            if args.output_dir is not None:
-                output_dir = os.path.join(args.output_dir, output_dir)
-                if accelerator.is_main_process:
-                    accelerator.save_state(output_dir)
+        # metric_name = metric_mapping[args.task_name]
+        # if eval_metric[metric_name] >= best_metric:
+        #     best_metric = eval_metric[metric_name]
+        #     if args.output_dir is not None:
+        #         output_dir = os.path.join(args.output_dir, output_dir)
+        #         if accelerator.is_main_process:
+        #             accelerator.save_state(output_dir)
 
 
-        if args.checkpointing_steps == "epoch":
-            output_dir = f"epoch_{epoch}"
-            if args.output_dir is not None:
-                output_dir = os.path.join(args.output_dir, output_dir)
+        # if args.checkpointing_steps == "epoch":
+        #     output_dir = f"epoch_{epoch}"
+        #     if args.output_dir is not None:
+        #         output_dir = os.path.join(args.output_dir, output_dir)
 
-                if accelerator.is_main_process:
-                    accelerator.save_state(output_dir)
+        #         if accelerator.is_main_process:
+        #             accelerator.save_state(output_dir)
 
     if args.with_tracking:
         accelerator.end_training()
