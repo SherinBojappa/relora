@@ -163,7 +163,8 @@ def parse_args():
     parser.add_argument(
         "--lr_scheduler_type",
         type=SchedulerType,
-        default="linear",
+        # default="cosine_with_restarts",
+        default = "cosine",
         help="The scheduler type to use.",
         choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
     )
@@ -555,17 +556,17 @@ def main():
                                                   restart_warmup_steps = args.restart_warmup_steps, \
                                                   reset_freq=args.reset_freq)
     else:
-        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+        optimizer = torch.optim.Adam(optimizer_grouped_parameters, lr=args.learning_rate)
         lr_scheduler = get_scheduler(
             name=args.lr_scheduler_type,
             optimizer=optimizer,
             num_warmup_steps=args.num_warmup_steps,
             num_training_steps=args.max_train_steps,
         )
+
     # Prepare everything with our `accelerator`.
-    model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
-    )
+    model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+        model, optimizer, train_dataloader, eval_dataloader)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
