@@ -556,7 +556,7 @@ def main():
                                                   restart_warmup_steps = args.restart_warmup_steps, \
                                                   reset_freq=args.reset_freq)
     else:
-        optimizer = torch.optim.Adam(optimizer_grouped_parameters, lr=args.learning_rate)
+        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
         lr_scheduler = get_scheduler(
             name=args.lr_scheduler_type,
             optimizer=optimizer,
