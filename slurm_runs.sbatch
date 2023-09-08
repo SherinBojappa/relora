@@ -28,27 +28,27 @@ python -u -m accelerate.commands.launch run_glue_no_trainer.py \
     --task_name qqp --model_name_or_path t5-base --relora \
     --max_train_steps 4000 --reset_freq 2000 \
     --learning_rate 2e-4 --r 32
-&
+
 python -u -m accelerate.commands.launch run_glue_no_trainer.py \
     --task_name qqp --model_name_or_path t5-base --relora \
     --max_train_steps 4000 --reset_freq 2000 \
     --learning_rate 1e-4 --r 32
-&
+
 python -u -m accelerate.commands.launch run_glue_no_trainer.py \
     --task_name qqp --model_name_or_path t5-base --relora \
     --max_train_steps 4000 --reset_freq 2000 \
     --learning_rate 5e-4 --r 32
-&
+
 python -u -m accelerate.commands.launch run_glue_no_trainer.py \
     --task_name mnli --model_name_or_path t5-base --relora \
     --max_train_steps 4000 --reset_freq 2000 \
     --learning_rate 2e-4 --r 32
-&
+
 python -u -m accelerate.commands.launch run_glue_no_trainer.py \
     --task_name mnli --model_name_or_path t5-base --relora \
     --max_train_steps 4000 --reset_freq 2000 \
     --learning_rate 1e-4 --r 32
-&
+
 python -u -m accelerate.commands.launch run_glue_no_trainer.py \
     --task_name mnli --model_name_or_path t5-base --relora \
     --max_train_steps 4000 --reset_freq 2000 \
