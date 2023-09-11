@@ -1,3 +1,4 @@
+.venv
 wandb/
 __pycache__/
 scratch.ipynb/
@@ -5,3 +6,4 @@ scratch.ipynb/
 best_model*/
 model*/
 torchelastic_*/
+results

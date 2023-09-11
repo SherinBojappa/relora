@@ -19,7 +19,6 @@ import logging
 import math
 import os
 import random
-from pathlib import Path
 
 import datasets
 import evaluate
@@ -28,7 +27,6 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from datasets import load_dataset
-from huggingface_hub import Repository, create_repo
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -82,7 +80,7 @@ metric_mapping = {
 }
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Finetune a transformers model on a text classification task")
+    parser = argparse.ArgumentParser(description="Finetune a transformers model on a text classification task using ReLoRA")
     parser.add_argument(
         "--task_name",
         type=str,
@@ -124,14 +122,13 @@ def parse_args():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        # default=12,
         default=8,
         help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument(
         "--per_device_eval_batch_size",
         type=int,
-        default=12,
+        default=None,
         help="Batch size (per device) for the evaluation dataloader.",
     )
     parser.add_argument(
@@ -163,7 +160,6 @@ def parse_args():
     parser.add_argument(
         "--lr_scheduler_type",
         type=SchedulerType,
-        # default="cosine_with_restarts",
         default = "cosine",
         help="The scheduler type to use.",
         choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
@@ -173,11 +169,6 @@ def parse_args():
     )
     parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
-    parser.add_argument(
-        "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local `output_dir`."
-    )
-    parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
     parser.add_argument(
         "--trust_remote_code",
         type=bool,
@@ -201,58 +192,36 @@ def parse_args():
         help="If the training should continue from a checkpoint folder.",
     )
     parser.add_argument(
-        "--with_tracking",
-        action="store_true",
-        default=True,
-        help="Whether to enable experiment trackers for logging.",
-    )
-    parser.add_argument(
-        "--report_to",
-        type=str,
-        default="wandb",
-        help=(
-            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`,'
-            ' `"wandb"`, `"comet_ml"` and `"clearml"`. Use `"all"` (default) to report to all integrations.'
-            "Only applicable when `--with_tracking` is passed."
-        ),
-    )
-    parser.add_argument(
-        "--ignore_mismatched_sizes",
-        action="store_true",
-        help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
-    )
-
-    parser.add_argument(
         "--relora",
         action="store_true",
         default=False,
         required=False,
-        help="Whether to use ReLoRA or not")
-
+        help="Whether to use ReLoRA or not",
+    )
     parser.add_argument(
         "--r",
         type=int,
         default=128,
-        help="rank used in ReLoRA")
-
+        help="rank used in ReLoRA",
+    )
     parser.add_argument(
         "--reset_freq",
         type=int,
         default=2_000,
-        help="Frequency of ReLoRA")
-
+        help="Frequency of ReLoRA",
+    )
     parser.add_argument(
         "--restart_warmup_steps",
         type=int,
         default=100,
-        help="Number of restart warmup steps to perform")
-
+        help="Number of restart warmup steps to perform",
+    )
     parser.add_argument(
         "--pruning_percentage",
         type=float,
         default=0.9,
-        help="Pruning percentage")
-
+        help="Pruning percentage",
+    )
     args = parser.parse_args()
 
     # Sanity checks
@@ -266,24 +235,27 @@ def parse_args():
             extension = args.validation_file.split(".")[-1]
             assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
 
-    if args.push_to_hub:
-        assert args.output_dir is not None, "Need an `output_dir` to create a repo when `--push_to_hub` is passed."
+    if args.per_device_eval_batch_size is None:
+        args.per_device_eval_batch_size = args.per_device_train_batch_size
+
+    if args.relora and args.scheduler_type != "cosine_with_restarts":
+        raise ValueError("ReLoRA only supports cosine_with_restarts scheduler")
 
     return args
 
 
 def main():
     args = parse_args()
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_glue_no_trainer", args)
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
     # in the environment
-    accelerator = (
-        Accelerator(log_with=args.report_to, project_dir=args.output_dir, mixed_precision='bf16') if args.with_tracking else Accelerator()
+    accelerator = Accelerator(
+        log_with="wandb",
+        project_dir=args.output_dir,
+        mixed_precision='bf16',
     )
+
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -302,36 +274,9 @@ def main():
     if args.seed is not None:
         set_seed(args.seed)
 
-    # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.push_to_hub:
-            # Retrieve of infer repo_name
-            repo_name = args.hub_model_id
-            if repo_name is None:
-                repo_name = Path(args.output_dir).absolute().name
-            # Create repo and retrieve repo_id
-            repo_id = create_repo(repo_name, exist_ok=True, token=args.hub_token).repo_id
-            # Clone repo locally
-            repo = Repository(args.output_dir, clone_from=repo_id, token=args.hub_token)
-
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
-        elif args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
+    if accelerator.is_main_process and args.output_dir is not None:
+        os.makedirs(args.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
-
-    # Get the datasets: you can either provide your own CSV/JSON training and evaluation files (see below)
-    # or specify a GLUE benchmark task (the dataset will be downloaded automatically from the datasets Hub).
-
-    # For CSV/JSON files, this script will use as labels the column called 'label' and as pair of sentences the
-    # sentences in columns called 'sentence1' and 'sentence2' if such column exists or the first two columns not named
-    # label if at least two columns are provided.
-
-    # If the CSVs/JSONs contain only one non-label column, the script does single sentence classification on this
-    # single column. You can easily tweak this behavior (see below)
 
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
@@ -397,7 +342,6 @@ def main():
         args.model_name_or_path,
         from_tf=bool(".ckpt" in args.model_name_or_path),
         config=config,
-        ignore_mismatched_sizes=args.ignore_mismatched_sizes,
         trust_remote_code=args.trust_remote_code,
     )
 
@@ -582,11 +526,14 @@ def main():
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
-    if args.with_tracking:
-        experiment_config = vars(args)
-        # TensorBoard cannot log Enums, need the raw value
-        experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-        accelerator.init_trackers("relora_glue_fine_tuning", experiment_config)
+    experiment_config = vars(args)
+    # TensorBoard cannot log Enums, need the raw value
+    experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
+    experiment_config["gradient_accumulation_steps"] = gradient_accumulation_steps
+    for k, v in dict(vars(args)).items():
+        experiment_config[k] = v
+    
+    accelerator.init_trackers("relora_glue_fine_tuning", experiment_config)
 
     # Get the metric function
     if args.task_name is not None:
@@ -637,11 +584,9 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
-    best_metric = 0
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
-        if args.with_tracking:
-            total_loss = 0
+        total_loss = 0
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
@@ -656,8 +601,7 @@ def main():
             outputs = model(**batch)
             loss = outputs.loss
             # We keep track of the loss at each epoch
-            if args.with_tracking:
-                total_loss += loss.detach().float()
+            total_loss += loss.detach().float()
             loss = loss / gradient_accumulation_steps
             accelerator.backward(loss)
 
@@ -674,16 +618,13 @@ def main():
 
                 progress_bar.update(1)
                 completed_steps += 1
-                if args.with_tracking:
-                  accelerator.log(
-                    {
-                        #"accuracy" if args.task_name is not None else "glue": eval_metric,
-                        "train_loss": total_loss.item()/gradient_accumulation_steps,
-                        "lr": optimizer.param_groups[0]["lr"],
-                        "epoch": epoch,
-                        "step": completed_steps,
-                    },
-                    step=completed_steps,
+                accelerator.log({
+                    "train_loss": total_loss.item()/gradient_accumulation_steps,
+                    "lr": optimizer.param_groups[0]["lr"],
+                    "epoch": epoch,
+                    "step": completed_steps,
+                },
+                step=completed_steps,
                 )
 
                 total_loss = 0
@@ -723,51 +664,18 @@ def main():
                 eval_metric = metric.compute()
                 logger.info(f"epoch {epoch}: {eval_metric}")
 
-                if args.with_tracking:
-                    accelerator.log(
-                        {
-                            "accuracy" if args.task_name is not None else "glue": eval_metric,
-                            #"train_loss": total_loss.item() / len(train_dataloader),
-                            #"lr": optimizer.param_groups[0]["lr"],
-                            "epoch": epoch,
-                            "step": completed_steps,
-                        },
-                        step=completed_steps,
-                    )
-
-        if args.push_to_hub and epoch < args.num_train_epochs - 1:
-            accelerator.wait_for_everyone()
-            unwrapped_model = accelerator.unwrap_model(model)
-            unwrapped_model.save_pretrained(
-                args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-            )
-            if accelerator.is_main_process:
-                tokenizer.save_pretrained(args.output_dir)
-                repo.push_to_hub(
-                    commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
+                accelerator.log(
+                    {
+                        "accuracy" if args.task_name is not None else "glue": eval_metric,
+                        #"train_loss": total_loss.item() / len(train_dataloader),
+                        #"lr": optimizer.param_groups[0]["lr"],
+                        "epoch": epoch,
+                        "step": completed_steps,
+                    },
+                    step=completed_steps,
                 )
 
-        # we do not need to evaluate this because we are doing evaluation every eval_every steps
-        # save only the model pertaining to the best metric
-        # metric_name = metric_mapping[args.task_name]
-        # if eval_metric[metric_name] >= best_metric:
-        #     best_metric = eval_metric[metric_name]
-        #     if args.output_dir is not None:
-        #         output_dir = os.path.join(args.output_dir, output_dir)
-        #         if accelerator.is_main_process:
-        #             accelerator.save_state(output_dir)
-
-
-        # if args.checkpointing_steps == "epoch":
-        #     output_dir = f"epoch_{epoch}"
-        #     if args.output_dir is not None:
-        #         output_dir = os.path.join(args.output_dir, output_dir)
-
-        #         if accelerator.is_main_process:
-        #             accelerator.save_state(output_dir)
-
-    if args.with_tracking:
-        accelerator.end_training()
+    accelerator.end_training()
 
     if args.output_dir is not None:
         accelerator.wait_for_everyone()
@@ -777,8 +685,6 @@ def main():
         )
         if accelerator.is_main_process:
             tokenizer.save_pretrained(args.output_dir)
-            if args.push_to_hub:
-                repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
 
     if args.task_name == "mnli":
         # Final evaluation on mismatched validation set
