@@ -581,6 +581,7 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
+    relora_resets = 0
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
         total_loss = 0
@@ -589,12 +590,8 @@ def main():
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
-        # num_lost = 0
+
         for step, batch in enumerate(active_dataloader):
-            # not good as most batches are affected
-            # if len(batch['input_ids'][0]) > 60:
-            #     num_lost += 1
-            #     continue
             outputs = model(**batch)
             loss = outputs.loss
             # We keep track of the loss at each epoch
@@ -603,27 +600,28 @@ def main():
             accelerator.backward(loss)
 
             if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-            #if (step + 1) % args.gradient_accumulation_steps == 0:
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
                 # relora merge weights, reinit weights and reset optimizer
                 if args.relora and completed_steps % args.reset_freq == 0:
+                    logger.info(f"Resetting ReLoRA at step {completed_steps}")
+                    relora_resets += 1
                     merge_and_reinit_functional(model)
                     reset_optimizer(optimizer, reset_params=optimizer_params_to_reset, pruning_amount=args.pruning_percentage)
 
                 progress_bar.update(1)
                 completed_steps += 1
                 accelerator.log({
-                    "train_loss": total_loss.item()/gradient_accumulation_steps,
+                    "train_loss": total_loss.item() / gradient_accumulation_steps,
                     "lr": optimizer.param_groups[0]["lr"],
                     "epoch": epoch,
                     "step": completed_steps,
-                },
-                step=completed_steps,
+                    "relora_resets": relora_resets,
+                    },
+                    step=completed_steps,
                 )
-
                 total_loss = 0
 
             if isinstance(checkpointing_steps, int):
@@ -664,8 +662,6 @@ def main():
                 accelerator.log(
                     {
                         "accuracy" if args.task_name is not None else "glue": eval_metric,
-                        #"train_loss": total_loss.item() / len(train_dataloader),
-                        #"lr": optimizer.param_groups[0]["lr"],
                         "epoch": epoch,
                         "step": completed_steps,
                     },
