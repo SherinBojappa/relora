@@ -529,10 +529,7 @@ def main():
     experiment_config = vars(args)
     # TensorBoard cannot log Enums, need the raw value
     experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-    experiment_config["gradient_accumulation_steps"] = gradient_accumulation_steps
-    for k, v in dict(vars(args)).items():
-        experiment_config[k] = v
-    
+    experiment_config["gradient_accumulation_steps"] = gradient_accumulation_steps    
     accelerator.init_trackers("relora_glue_fine_tuning", experiment_config)
 
     # Get the metric function
