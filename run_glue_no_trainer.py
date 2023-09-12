@@ -238,7 +238,7 @@ def parse_args():
     if args.per_device_eval_batch_size is None:
         args.per_device_eval_batch_size = args.per_device_train_batch_size
 
-    if args.relora and args.scheduler_type != "cosine_with_restarts":
+    if args.relora and args.lr_scheduler_type != "cosine_with_restarts":
         raise ValueError("ReLoRA only supports cosine_with_restarts scheduler")
 
     return args
