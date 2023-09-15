@@ -160,7 +160,7 @@ def parse_args():
     parser.add_argument(
         "--lr_scheduler_type",
         type=SchedulerType,
-        default = "cosine",
+        default = "cosine_with_restarts",
         help="The scheduler type to use.",
         choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
     )
@@ -529,7 +529,7 @@ def main():
     experiment_config = vars(args)
     # TensorBoard cannot log Enums, need the raw value
     experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-    experiment_config["gradient_accumulation_steps"] = gradient_accumulation_steps    
+    experiment_config["gradient_accumulation_steps"] = gradient_accumulation_steps
     accelerator.init_trackers("relora_glue_fine_tuning", experiment_config)
 
     # Get the metric function
