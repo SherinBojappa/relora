@@ -325,9 +325,14 @@ def main():
         finetuning_task=args.task_name,
         trust_remote_code=args.trust_remote_code,
     )
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name_or_path, use_fast=not args.use_slow_tokenizer, trust_remote_code=args.trust_remote_code
-    )
+    # these are models that are pre-trained with relora use t5-base tokenizer
+    if '/mnt' in args.model_name_or_path:
+        tokenizer = AutoTokenizer.from_pretrained(
+        't5-base', use_fast=not args.use_slow_tokenizer, trust_remote_code=args.trust_remote_code)
+        print("Using t5-base tokenizer")
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_name_or_path, use_fast=not args.use_slow_tokenizer, trust_remote_code=args.trust_remote_code)
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is not None:
             tokenizer.pad_token = tokenizer.eos_token
